@@ -1,0 +1,1291 @@
+diff -ruN a/README.md b/README.md
+--- a/README.md	2026-10-30 10:44:21.461797834 +0000
++++ b/README.md	2026-10-30 10:44:21.457526912 +0000
+@@ -48,6 +48,7 @@
+ - **Hi-Res lossless audio** — FLAC/ALAC from a configured module source, with YouTube Music as fallback.
+ - **Gapless playback with true crossfade**, adjustable 0–12s.
+ - **Automix [Beta]** — DJ-style transitions with beat-matching and tempo-stretching.
++- **AI Mix [Beta]** — a queue built from what you listen to, or from a genre you pick (or one the AI picks at random), played through Automix. History stays on your device.
+ - **Offline downloads** — save tracks with embedded metadata.
+ - **Local music library** integration.
+ - **Background playback** via a proper foreground media session.
+diff -ruN a/app/src/main/java/com/music/bitchord/MainActivity.kt b/app/src/main/java/com/music/bitchord/MainActivity.kt
+--- a/app/src/main/java/com/music/bitchord/MainActivity.kt	2026-10-30 10:44:21.471079782 +0000
++++ b/app/src/main/java/com/music/bitchord/MainActivity.kt	2026-10-30 10:44:21.466115120 +0000
+@@ -311,6 +311,9 @@
+ import com.music.bitchord.data.settings.LibraryViewType
+ import com.music.bitchord.data.settings.LocalMusicSort
+ import com.music.bitchord.ui.screens.HomeScreen
++import com.music.bitchord.ui.screens.AiMixSection
++import com.music.bitchord.data.aimix.AiMix
++import com.music.bitchord.playback.smart.AiMixMode
+ import com.music.bitchord.ui.screens.LibraryGridPage
+ import com.music.bitchord.ui.screens.LibraryScreen
+ import com.music.bitchord.ui.screens.MoodGenrePlaylistsScreen
+@@ -1488,6 +1491,19 @@
+     }
+ 
+     /**
++     * Builds an AI Mix and plays it as the queue. The build can take a few
++     * seconds (a few searches or radios), during which the Home section shows
++     * its own progress; a mix that finds nothing leaves the queue alone and the
++     * section says so.
++     */
++    val startAiMix: (AiMixMode) -> Unit = { mode ->
++        scope.launch {
++            val mix = AiMix.build(context, mode) ?: return@launch
++            playFrom(mix.songs, 0, QueueSource(mix.title, PlaybackSourceType.HOME))
++        }
++    }
++
++    /**
+      * Starts the explicit station offered by every song overflow menu.
+      *
+      * The related tracks come from YouTube Music's own RDAMVM watch queue.
+@@ -3087,6 +3103,14 @@
+                                 onLoadMore = viewModel::loadMoreHome,
+                                 loadingMore = homeLoadingMore,
+                                 recentlyPlayedLoading = homeRecentlyPlayedLoading,
++                                aiMixSection = {
++                                    val aiMix by AiMix.state.collectAsStateWithLifecycle()
++                                    AiMixSection(
++                                        busy = aiMix.busy,
++                                        failed = aiMix.failed,
++                                        onStart = startAiMix,
++                                    )
++                                },
+                             )
+                             TAB_EXPLORE -> selectedMoodGenre?.let { category ->
+                                 MoodGenrePlaylistsScreen(
+diff -ruN a/app/src/main/java/com/music/bitchord/data/aimix/AiMix.kt b/app/src/main/java/com/music/bitchord/data/aimix/AiMix.kt
+--- a/app/src/main/java/com/music/bitchord/data/aimix/AiMix.kt	1970-01-01 00:00:00.000000000 +0000
++++ b/app/src/main/java/com/music/bitchord/data/aimix/AiMix.kt	2026-10-30 10:44:21.475395559 +0000
+@@ -0,0 +1,270 @@
++package com.music.bitchord.data.aimix
++
++import android.content.Context
++import android.util.Log
++import com.music.bitchord.data.YtMusicRepository
++import com.music.bitchord.data.model.SearchFilter
++import com.music.bitchord.data.model.SearchResult
++import com.music.bitchord.data.model.Song
++import com.music.bitchord.data.stats.ArtistFacts
++import com.music.bitchord.data.stats.ListeningStats
++import com.music.bitchord.data.stats.RankedSong
++import com.music.bitchord.data.stats.ReplayPeriod
++import com.music.bitchord.playback.smart.AiMixCandidate
++import com.music.bitchord.playback.smart.AiMixEngine
++import com.music.bitchord.playback.smart.AiMixFeatures
++import com.music.bitchord.playback.smart.AiMixGenre
++import com.music.bitchord.playback.smart.AiMixGenres
++import com.music.bitchord.playback.smart.AiMixMode
++import com.music.bitchord.playback.smart.AiMixOrigin
++import com.music.bitchord.playback.smart.AiMixTaste
++import com.music.bitchord.playback.smart.AnalysisStore
++import kotlinx.coroutines.CancellationException
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.async
++import kotlinx.coroutines.awaitAll
++import kotlinx.coroutines.coroutineScope
++import kotlinx.coroutines.flow.MutableStateFlow
++import kotlinx.coroutines.flow.StateFlow
++import kotlinx.coroutines.flow.asStateFlow
++import kotlinx.coroutines.withContext
++import kotlin.random.Random
++
++/** A finished mix, ready to be queued. */
++data class AiMixResult(
++    val songs: List<Song>,
++    /** What the queue is called, e.g. `AI Mix · Jazz`. */
++    val title: String,
++    /** The genre the mix was built around, or null for a mix built from habits. */
++    val genre: AiMixGenre?,
++)
++
++/**
++ * Builds AI Mixes: a queue made from what the listener plays, or from a genre,
++ * either picked by hand or chosen at random.
++ *
++ * Everything the listener's history contributes stays on the device. The only
++ * network traffic is what browsing YouTube Music already makes — a radio for a
++ * few songs, or a few searches for the genre — and none of it carries the
++ * history, only the ids and names of the songs being asked about.
++ *
++ * The ranking itself is in [AiMixEngine], which has no I/O; this gathers its
++ * inputs.
++ */
++object AiMix {
++
++    private const val TAG = "AiMix"
++
++    /** How many top songs are considered as seeds, and how many of them are used per mix. */
++    private const val SEED_POOL = 12
++    private const val SEEDS_PER_MIX = 5
++    private const val EXTRA_SEEDS = 2
++
++    data class State(
++        val busy: Boolean = false,
++        /** The last attempt found nothing to play. Cleared by the next one. */
++        val failed: Boolean = false,
++    )
++
++    private val _state = MutableStateFlow(State())
++    val state: StateFlow<State> = _state.asStateFlow()
++
++    @Volatile
++    private var lastSurprise: String? = null
++
++    @Volatile
++    private var store: AnalysisStore? = null
++
++    /**
++     * Builds one mix, or returns null when nothing could be found (offline, or
++     * nothing to seed from). Ignored while another is being built.
++     */
++    suspend fun build(context: Context, requested: AiMixMode): AiMixResult? {
++        if (_state.value.busy) return null
++        _state.value = State(busy = true)
++        var failed = false
++        try {
++            val built = withContext(Dispatchers.IO) { buildInternal(context.applicationContext, requested) }
++            failed = built == null
++            return built
++        } catch (failure: Exception) {
++            // A cancelled build is the user leaving, not a failure to report.
++            if (failure is CancellationException) throw failure
++            Log.w(TAG, "AI Mix failed", failure)
++            failed = true
++            return null
++        } finally {
++            _state.value = State(busy = false, failed = failed)
++        }
++    }
++
++    private suspend fun buildInternal(context: Context, requested: AiMixMode): AiMixResult? {
++        val random = Random.Default
++        val summary = ListeningStats.summary(ReplayPeriod.ALL_TIME)
++        val taste = tasteFrom(summary.songs, summary.artists.map { it.title to it.ms })
++
++        // "For you" with no history has nothing to be for; make it a surprise
++        // rather than an empty queue.
++        val mode = when {
++            requested is AiMixMode.Surprise ||
++                (requested is AiMixMode.ForYou && summary.isEmpty) -> {
++                val picked = AiMixGenres.pickSurprise(random, except = lastSurprise)
++                lastSurprise = picked.id
++                AiMixMode.Genre(picked.id)
++            }
++            else -> requested
++        }
++        val genre = (mode as? AiMixMode.Genre)?.let { AiMixGenres.byId(it.id) }
++
++        val candidates = when (mode) {
++            is AiMixMode.Genre -> if (genre != null) genreCandidates(genre, summary.songs, taste, random) else emptyList()
++            else -> habitCandidates(summary.songs, random)
++        }
++        if (candidates.isEmpty()) return null
++
++        val tasteWithCandidates = withCandidateArtists(taste, candidates.map { it.song })
++        val songs = AiMixEngine.build(
++            mode = mode,
++            taste = tasteWithCandidates,
++            candidates = candidates,
++            features = featuresFor(context, candidates.map { it.song.videoId }),
++            random = random,
++        )
++        if (songs.isEmpty()) return null
++        return AiMixResult(
++            songs = songs,
++            title = if (genre != null) "AI Mix · ${genre.label}" else "AI Mix",
++            genre = genre,
++        )
++    }
++
++    // ── Taste ────────────────────────────────────────────────────────────────
++
++    private fun tasteFrom(songs: List<RankedSong>, artists: List<Pair<String, Long>>): AiMixTaste {
++        val maxMs = artists.maxOfOrNull { it.second }?.takeIf { it > 0 } ?: 1L
++        val weights = HashMap<String, Double>()
++        val genres = HashMap<String, Set<String>>()
++        for ((name, ms) in artists) {
++            val key = AiMixEngine.artistKey(name)
++            weights[key] = ms.toDouble() / maxMs
++            genresOf(name)?.let { genres[key] = it }
++        }
++        return AiMixTaste(
++            songPlays = songs.associate { it.song.videoId to it.plays },
++            artistWeights = weights,
++            artistGenres = genres,
++        )
++    }
++
++    /**
++     * The history keys artists by their lead name, a candidate's byline names
++     * everyone ("A & B"). Copy the lead's weight and genres onto the full
++     * credit so a collaboration counts as its main artist, and add what is
++     * already known about the candidates' own artists. Reads only; nothing here
++     * asks the network about an artist.
++     */
++    private fun withCandidateArtists(taste: AiMixTaste, candidates: List<Song>): AiMixTaste {
++        val weights = HashMap(taste.artistWeights)
++        val genres = HashMap(taste.artistGenres)
++        for (song in candidates) {
++            val full = AiMixEngine.artistKey(song.artist)
++            val lead = leadKey(song.artist)
++            if (full != lead) {
++                taste.artistWeights[lead]?.let { weights.putIfAbsent(full, it) }
++            }
++            if (full !in genres) {
++                (taste.artistGenres[lead] ?: genresOf(song.artist) ?: genresOf(lead))
++                    ?.let { genres[full] = it }
++            }
++        }
++        return taste.copy(artistWeights = weights, artistGenres = genres)
++    }
++
++    /** The key the listening history uses for whoever leads a credit. */
++    private fun leadKey(credit: String): String =
++        AiMixEngine.artistKey(ListeningStats.primaryArtist(credit) ?: credit)
++
++    private fun genresOf(artist: String): Set<String>? =
++        ArtistFacts.genresFor(artist).map(AiMixGenres::keyOf).toSet().takeIf { it.isNotEmpty() }
++
++    // ── Candidates ───────────────────────────────────────────────────────────
++
++    /** The radio of a few of the listener's most played songs, a different few each time. */
++    private suspend fun habitCandidates(songs: List<RankedSong>, random: Random): List<AiMixCandidate> {
++        val ranked = songs.sortedByDescending { it.ms }
++        val seeds = (
++            ranked.take(SEED_POOL).shuffled(random).take(SEEDS_PER_MIX) +
++                ranked.drop(SEED_POOL).take(30).shuffled(random).take(EXTRA_SEEDS)
++            ).map { it.song }
++        return radios(seeds, AiMixOrigin.HABIT_RADIO)
++    }
++
++    /**
++     * Search hits for the genre, plus the radio of a couple of songs that fit
++     * it: the listener's own where they have any, otherwise the top search hits.
++     */
++    private suspend fun genreCandidates(
++        genre: AiMixGenre,
++        history: List<RankedSong>,
++        taste: AiMixTaste,
++        random: Random,
++    ): List<AiMixCandidate> = coroutineScope {
++        val searches = genre.queries.map { query ->
++            async { searchSongs(query) }
++        }.awaitAll()
++
++        val found = searches.flatMap { songs ->
++            songs.mapIndexed { rank, song -> AiMixCandidate(song, AiMixOrigin.GENRE_SEARCH, rank) }
++        }
++
++        val key = AiMixGenres.keyOf(genre.id)
++        val own = history
++            .filter { key in taste.artistGenres[leadKey(it.song.artist)].orEmpty() }
++            .sortedByDescending { it.ms }
++            .take(4)
++            .shuffled(random)
++            .take(2)
++            .map { it.song }
++        val seeds = own.ifEmpty { searches.firstOrNull().orEmpty().take(2) }
++
++        found + radios(seeds, AiMixOrigin.GENRE_RADIO)
++    }
++
++    private suspend fun searchSongs(query: String): List<Song> =
++        YtMusicRepository.search(query, SearchFilter.SONGS).getOrNull().orEmpty().mapNotNull { row ->
++            when (row) {
++                is SearchResult.TopTrack -> row.song
++                is SearchResult.Track -> row.song
++                is SearchResult.Browse -> null
++            }
++        }
++
++    private suspend fun radios(seeds: List<Song>, origin: AiMixOrigin): List<AiMixCandidate> = coroutineScope {
++        seeds.map { seed ->
++            async {
++                val related = YtMusicRepository.radio(seed.videoId).getOrNull().orEmpty()
++                // The seed comes back first in its own radio.
++                related.filterNot { it.videoId == seed.videoId }
++                    .mapIndexed { rank, song -> AiMixCandidate(song, origin, rank) }
++            }
++        }.awaitAll().flatten()
++    }
++
++    // ── Sound ────────────────────────────────────────────────────────────────
++
++    /**
++     * Tempo and key for the candidates Automix has already analysed, so the mix
++     * can be ordered to flow. A candidate nobody has played has no entry, which
++     * the engine treats as neutral: analysing a song means downloading it, and a
++     * mix is not worth that.
++     */
++    private fun featuresFor(context: Context, ids: List<String>): Map<String, AiMixFeatures> {
++        val analyses = store ?: AnalysisStore { context.filesDir }.also { store = it }
++        val out = HashMap<String, AiMixFeatures>()
++        for (id in ids) {
++            val analysis = analyses.load(id)?.takeIf { it.isUsable } ?: continue
++            out[id] = AiMixFeatures(bpm = analysis.bpm, key = analysis.key)
++        }
++        return out
++    }
++}
+diff -ruN a/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/AiMixEngine.kt b/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/AiMixEngine.kt
+--- a/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/AiMixEngine.kt	1970-01-01 00:00:00.000000000 +0000
++++ b/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/AiMixEngine.kt	2026-10-30 10:44:21.479750492 +0000
+@@ -0,0 +1,442 @@
++package com.music.bitchord.playback.smart
++
++import com.music.bitchord.data.model.Song
++import kotlin.math.abs
++import kotlin.math.max
++import kotlin.math.min
++import kotlin.math.roundToInt
++import kotlin.random.Random
++
++/**
++ * A genre the listener can pick for an AI Mix.
++ *
++ * [id] is already normalised (see [AiMixGenres.keyOf]) so it can be compared
++ * with the genres [com.music.bitchord.data.stats.ArtistFacts] reports without
++ * caring how either side spells "hip-hop". [label] is what the chip shows.
++ * [queries] are what is typed into YouTube Music search to find the genre's
++ * songs; they are tried in order and each contributes candidates.
++ */
++data class AiMixGenre(
++    val id: String,
++    val label: String,
++    val queries: List<String> = listOf("$label hits", "best $label songs"),
++)
++
++/** What an AI Mix is built around. */
++sealed interface AiMixMode {
++    /** Built from what the listener plays. */
++    data object ForYou : AiMixMode
++
++    /** A genre the listener picked by hand. */
++    data class Genre(val id: String) : AiMixMode
++
++    /** A genre the engine picks at random. Resolved to [Genre] before building. */
++    data object Surprise : AiMixMode
++}
++
++object AiMixGenres {
++    val ALL: List<AiMixGenre> = listOf(
++        AiMixGenre("pop", "Pop"),
++        AiMixGenre("vpop", "V-Pop", listOf("nhạc Việt hay nhất", "V-Pop hits")),
++        AiMixGenre("kpop", "K-Pop"),
++        AiMixGenre("jpop", "J-Pop"),
++        AiMixGenre("rock", "Rock"),
++        AiMixGenre("hiphop", "Hip Hop"),
++        AiMixGenre("rnb", "R&B"),
++        AiMixGenre("edm", "EDM", listOf("EDM hits", "best electronic dance songs")),
++        AiMixGenre("house", "House"),
++        AiMixGenre("lofi", "Lo-fi", listOf("lofi chill beats", "lo-fi hip hop songs")),
++        AiMixGenre("jazz", "Jazz"),
++        AiMixGenre("blues", "Blues"),
++        AiMixGenre("soul", "Soul"),
++        AiMixGenre("funk", "Funk"),
++        AiMixGenre("disco", "Disco"),
++        AiMixGenre("country", "Country"),
++        AiMixGenre("indie", "Indie"),
++        AiMixGenre("latin", "Latin"),
++        AiMixGenre("reggae", "Reggae"),
++        AiMixGenre("metal", "Metal"),
++        AiMixGenre("classical", "Classical", listOf("classical music masterpieces", "best classical pieces")),
++        AiMixGenre("acoustic", "Acoustic"),
++        AiMixGenre("ballad", "Ballad"),
++    )
++
++    fun byId(id: String): AiMixGenre? = ALL.firstOrNull { it.id == id }
++
++    /**
++     * A genre name from anywhere (Last.fm tag, ArtistFacts label, a chip),
++     * reduced to the form [AiMixGenre.id] uses.
++     */
++    fun keyOf(name: String): String {
++        val flat = name.lowercase().filter { it.isLetterOrDigit() }
++        return KEY_ALIASES[flat] ?: flat
++    }
++
++    /**
++     * Any genre at all, for "surprise me". Never [except] — the one the last
++     * Surprise used — so pressing it twice does not repeat itself. When the
++     * list has nothing else to offer the exclusion is ignored.
++     */
++    fun pickSurprise(random: Random, except: String? = null): AiMixGenre {
++        val pool = ALL.filter { it.id != except }.ifEmpty { ALL }
++        return pool[random.nextInt(pool.size)]
++    }
++
++    private val KEY_ALIASES = mapOf(
++        "rb" to "rnb",
++        "randb" to "rnb",
++        "rhythmandblues" to "rnb",
++        "hiphoprap" to "hiphop",
++        "rap" to "hiphop",
++        "lo" to "lofi",
++        "lofihiphop" to "lofi",
++        "chillhop" to "lofi",
++        "electronic" to "edm",
++        "vietnamese" to "vpop",
++    )
++}
++
++/**
++ * What the listener's own history says, already boiled down.
++ *
++ * All keys are normalised with [AiMixEngine.artistKey] / [AiMixGenres.keyOf]
++ * by whoever builds this, so the engine never has to guess at spelling.
++ *
++ * @property songPlays plays per video id. A song in here counts as familiar.
++ * @property artistWeights how much the listener plays each artist, scaled so the
++ *   most played is 1.0.
++ * @property artistGenres the genres known for an artist. Empty for an artist
++ *   nothing is known about, which is the usual case when genre lookups are off.
++ */
++data class AiMixTaste(
++    val songPlays: Map<String, Int> = emptyMap(),
++    val artistWeights: Map<String, Double> = emptyMap(),
++    val artistGenres: Map<String, Set<String>> = emptyMap(),
++)
++
++/** How a candidate was found. A related track of something loved beats a cold search hit. */
++enum class AiMixOrigin(val base: Double) {
++    /** On YouTube Music's radio for a song the listener plays a lot. */
++    HABIT_RADIO(1.0),
++
++    /** On the radio of a song that fits the chosen genre. */
++    GENRE_RADIO(0.9),
++
++    /** A search hit for the chosen genre. */
++    GENRE_SEARCH(0.8),
++}
++
++/**
++ * One song that might go into the mix.
++ *
++ * @property rank where it stood in the list it came from, 0 being first. Both
++ *   radio and search put their best guesses first, so earlier is worth a little.
++ */
++data class AiMixCandidate(
++    val song: Song,
++    val origin: AiMixOrigin,
++    val rank: Int = 0,
++)
++
++/** What is known about a track's sound, from Automix's analysis cache. */
++data class AiMixFeatures(
++    val bpm: Double,
++    /**
++     * The key as [TrackAnalysis.key] states it, a pitch name and a mode such as
++     * `C♯ minor`. A Camelot code (`8A`) is accepted as well. Anything else is
++     * treated as unknown.
++     */
++    val key: String,
++)
++
++/**
++ * Turns a pile of candidates into an ordered queue.
++ *
++ * Pure on purpose: no network, no storage, no clock. The caller gathers the
++ * candidates and the taste; this decides what is worth playing and in what
++ * order, which is the part that needs tests.
++ *
++ * ## The idea
++ *
++ *  1. **Score** each candidate: where it came from, whether the listener plays
++ *     that artist, and — for a genre mix — whether the artist is known to fit.
++ *  2. **Split** into songs the listener knows and songs they don't, and take
++ *     mostly new ones ([freshShare]); a mix that only replays favourites is a
++ *     playlist, and one that is all strangers is a gamble.
++ *  3. **Weave** the two groups so the familiar ones are spread out rather than
++ *     bunched at the start.
++ *  4. **Arrange**: walk the list, and at each step take, from the next few
++ *     songs, the one that follows the current one best by tempo and key. That
++ *     only reorders locally, so the weave survives. Songs with no analysis are
++ *     neutral and keep their place. Automix does the actual blending on
++ *     playback.
++ */
++object AiMixEngine {
++
++    const val DEFAULT_SIZE = 30
++    private const val MAX_PER_ARTIST = 2
++    private const val ARRANGE_WINDOW = 6
++
++    /** An artist's name as every map in [AiMixTaste] is keyed. */
++    fun artistKey(name: String): String = name.lowercase().filter { it.isLetterOrDigit() }
++
++    /**
++     * @param mode [AiMixMode.ForYou] or [AiMixMode.Genre]. [AiMixMode.Surprise]
++     *   has no genre yet and is treated as ForYou; resolve it first with
++     *   [AiMixGenres.pickSurprise].
++     * @param freshShare the share of the mix that should be songs the listener
++     *   has not played, 0.0–1.0.
++     */
++    fun build(
++        mode: AiMixMode,
++        taste: AiMixTaste,
++        candidates: List<AiMixCandidate>,
++        size: Int = DEFAULT_SIZE,
++        freshShare: Double = 0.6,
++        features: Map<String, AiMixFeatures> = emptyMap(),
++        random: Random = Random.Default,
++    ): List<Song> {
++        if (size <= 0) return emptyList()
++        val genreKey = (mode as? AiMixMode.Genre)?.id?.let(AiMixGenres::keyOf)
++
++        val scored = dedupe(candidates).map { candidate ->
++            Scored(candidate.song, score(candidate, taste, genreKey, random), isFamiliar(candidate.song, taste))
++        }
++        if (scored.isEmpty()) return emptyList()
++
++        val fresh = scored.filterNot { it.familiar }.sortedByDescending { it.score }
++        val familiar = scored.filter { it.familiar }.sortedByDescending { it.score }
++
++        val freshWanted = (size * freshShare.coerceIn(0.0, 1.0)).roundToInt()
++        val artistCount = HashMap<String, Int>()
++        val pickedFresh = pick(fresh, freshWanted, artistCount)
++        val pickedFamiliar = pick(familiar, size - pickedFresh.size, artistCount)
++        // One group ran dry: let the other make up the difference.
++        val shortBy = size - pickedFresh.size - pickedFamiliar.size
++        val extraFresh = if (shortBy > 0) {
++            pick(fresh.filterNot { it in pickedFresh }, shortBy, artistCount)
++        } else {
++            emptyList()
++        }
++        val freshAll = pickedFresh + extraFresh
++        val stillShort = size - freshAll.size - pickedFamiliar.size
++        val extraFamiliar = if (stillShort > 0) {
++            pick(familiar.filterNot { it in pickedFamiliar }, stillShort, artistCount)
++        } else {
++            emptyList()
++        }
++
++        val woven = weave(freshAll, pickedFamiliar + extraFamiliar)
++        return separateNeighbours(arrange(woven, features)).map { it.song }
++    }
++
++    // ── Scoring ──────────────────────────────────────────────────────────────
++
++    private class Scored(val song: Song, val score: Double, val familiar: Boolean)
++
++    private fun score(
++        candidate: AiMixCandidate,
++        taste: AiMixTaste,
++        genreKey: String?,
++        random: Random,
++    ): Double {
++        val song = candidate.song
++        val artist = artistKey(song.artist)
++        var total = candidate.origin.base
++        total += 0.3 / (1.0 + candidate.rank / 5.0)
++        total += 0.8 * (taste.artistWeights[artist] ?: 0.0)
++        if (genreKey != null) {
++            val known = taste.artistGenres[artist].orEmpty()
++            if (genreKey in known) {
++                total += 0.6
++            } else if (known.isNotEmpty()) {
++                // Known, and known to be something else.
++                total -= 0.4
++            }
++        }
++        if (song.isVideo) total -= 0.25
++        // A little noise so two mixes from the same history are not identical.
++        total += random.nextDouble() * 0.15
++        return total
++    }
++
++    private fun isFamiliar(song: Song, taste: AiMixTaste): Boolean =
++        (taste.songPlays[song.videoId] ?: 0) > 0
++
++    private fun dedupe(candidates: List<AiMixCandidate>): List<AiMixCandidate> {
++        val seenIds = HashSet<String>()
++        val seenNames = HashSet<String>()
++        return candidates.filter { candidate ->
++            val song = candidate.song
++            if (song.videoId.isBlank()) return@filter false
++            val name = artistKey(song.title) + "|" + artistKey(song.artist)
++            // `add` is false for a repeat; both sets must see the song.
++            val newId = seenIds.add(song.videoId)
++            val newName = seenNames.add(name)
++            newId && newName
++        }
++    }
++
++    /** The best [count] of [sorted], at most [MAX_PER_ARTIST] per artist across the whole mix. */
++    private fun pick(sorted: List<Scored>, count: Int, artistCount: MutableMap<String, Int>): List<Scored> {
++        if (count <= 0) return emptyList()
++        val out = ArrayList<Scored>(count)
++        for (item in sorted) {
++            if (out.size >= count) break
++            val artist = artistKey(item.song.artist)
++            val used = artistCount[artist] ?: 0
++            if (used >= MAX_PER_ARTIST) continue
++            artistCount[artist] = used + 1
++            out += item
++        }
++        return out
++    }
++
++    /** Familiar songs spread evenly through the new ones. */
++    private fun weave(fresh: List<Scored>, familiar: List<Scored>): List<Scored> {
++        val total = fresh.size + familiar.size
++        if (familiar.isEmpty()) return fresh
++        if (fresh.isEmpty()) return familiar
++        val familiarShare = familiar.size.toDouble() / total
++        val out = ArrayList<Scored>(total)
++        var f = 0
++        var k = 0
++        while (f < fresh.size || k < familiar.size) {
++            val want = familiarShare * (out.size + 1)
++            val takeFamiliar = k < familiar.size && (f >= fresh.size || k < want - 0.5)
++            if (takeFamiliar) out += familiar[k++] else out += fresh[f++]
++        }
++        return out
++    }
++
++    // ── Ordering ─────────────────────────────────────────────────────────────
++
++    private fun arrange(order: List<Scored>, features: Map<String, AiMixFeatures>): List<Scored> {
++        if (order.size < 2) return order
++        val remaining = order.toMutableList()
++        val out = ArrayList<Scored>(order.size)
++        out += remaining.removeAt(0)
++        while (remaining.isNotEmpty()) {
++            val last = out.last()
++            val window = min(ARRANGE_WINDOW, remaining.size)
++            var best = 0
++            var bestCost = Double.MAX_VALUE
++            for (i in 0 until window) {
++                val next = remaining[i]
++                var cost = transitionCost(features[last.song.videoId], features[next.song.videoId])
++                cost += 0.05 * i
++                if (artistKey(next.song.artist) == artistKey(last.song.artist)) cost += 1.0
++                if (cost < bestCost) {
++                    bestCost = cost
++                    best = i
++                }
++            }
++            out += remaining.removeAt(best)
++        }
++        return out
++    }
++
++    /**
++     * The walk in [arrange] can paint itself into a corner and end on two songs
++     * by the same artist, because the last ones left are all that is available.
++     * Swap such a song with one elsewhere in the list, but only when the swap
++     * leaves neither place next to the same artist, so it never trades one
++     * clash for another.
++     */
++    private fun separateNeighbours(order: List<Scored>): List<Scored> {
++        val list = order.toMutableList()
++        fun same(a: Int, b: Int): Boolean =
++            a in list.indices && b in list.indices &&
++                artistKey(list[a].song.artist) == artistKey(list[b].song.artist)
++        fun clashes(i: Int): Boolean = same(i, i - 1) || same(i, i + 1)
++
++        for (i in 1 until list.size) {
++            if (!same(i, i - 1)) continue
++            val others = (i + 1 until list.size) + (0 until i - 1)
++            for (j in others) {
++                val moved = list[i]
++                list[i] = list[j]
++                list[j] = moved
++                if (!clashes(i) && !clashes(j)) break
++                list[j] = list[i]
++                list[i] = moved
++            }
++        }
++        return list
++    }
++
++    /**
++     * How awkward it is to go from [from] to [to]. Lower is better. Unknown
++     * sound is neutral (0.5) rather than good or bad, so unanalysed songs stay
++     * where the weave put them.
++     */
++    fun transitionCost(from: AiMixFeatures?, to: AiMixFeatures?): Double {
++        if (from == null || to == null) return NEUTRAL_COST
++        return tempoCost(from.bpm, to.bpm) + keyCost(from.key, to.key)
++    }
++
++    private const val NEUTRAL_COST = 0.5
++
++    /** Tempo gap, with half and double time counted as the same pulse. */
++    private fun tempoCost(a: Double, b: Double): Double {
++        if (a <= 0.0 || b <= 0.0) return 0.3
++        var ratio = max(a, b) / min(a, b)
++        while (ratio >= 1.5) ratio /= 2.0
++        return abs(ratio - 1.0) * 4.0
++    }
++
++    /** Distance on the Camelot wheel: same key is free, neighbours are cheap. */
++    private fun keyCost(a: String, b: String): Double {
++        val x = parseKey(a) ?: return 0.3
++        val y = parseKey(b) ?: return 0.3
++        val gap = abs(x.first - y.first)
++        val around = min(gap, 12 - gap)
++        val sameMode = x.second == y.second
++        return if (sameMode) {
++            when (around) {
++                0 -> 0.0
++                1 -> 0.1
++                else -> 0.2 + 0.05 * around
++            }
++        } else {
++            when (around) {
++                0 -> 0.1
++                1 -> 0.4
++                else -> 0.4 + 0.05 * around
++            }
++        }
++    }
++
++    private val PITCH = mapOf(
++        "C" to 0, "C♯" to 1, "C#" to 1, "D♭" to 1, "DB" to 1, "D" to 2,
++        "D♯" to 3, "D#" to 3, "E♭" to 3, "EB" to 3, "E" to 4, "F" to 5,
++        "F♯" to 6, "F#" to 6, "G♭" to 6, "GB" to 6, "G" to 7,
++        "G♯" to 8, "G#" to 8, "A♭" to 8, "AB" to 8, "A" to 9,
++        "A♯" to 10, "A#" to 10, "B♭" to 10, "BB" to 10, "B" to 11,
++    )
++
++    /**
++     * A key as a position on the Camelot wheel: its number 1–12 and `'A'`
++     * (minor) or `'B'` (major). Takes either a Camelot code or the analyzer's
++     * `C♯ minor`. A pitch with no stated mode is read as major.
++     */
++    private fun parseKey(code: String): Pair<Int, Char>? {
++        val trimmed = code.trim().uppercase()
++        if (trimmed.isEmpty()) return null
++
++        // Already Camelot: `8A`.
++        val last = trimmed.last()
++        if ((last == 'A' || last == 'B') && trimmed.length >= 2) {
++            val number = trimmed.dropLast(1).toIntOrNull()
++            if (number != null) return if (number in 1..12) number to last else null
++        }
++
++        val parts = trimmed.split(' ').filter { it.isNotEmpty() }
++        val pitch = PITCH[parts.firstOrNull()] ?: return null
++        val minor = parts.getOrNull(1)?.startsWith("MIN") == true
++        // Minor keys sit on the wheel as their relative major, three semitones up.
++        val majorPitch = if (minor) (pitch + 3) % 12 else pitch
++        val number = ((7 + majorPitch * 7) % 12) + 1
++        return number to (if (minor) 'A' else 'B')
++    }
++}
+diff -ruN a/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/AiMixEngineTest.kt b/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/AiMixEngineTest.kt
+--- a/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/AiMixEngineTest.kt	1970-01-01 00:00:00.000000000 +0000
++++ b/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/AiMixEngineTest.kt	2026-10-30 10:44:21.484018373 +0000
+@@ -0,0 +1,227 @@
++package com.music.bitchord.playback.smart
++
++import com.music.bitchord.data.model.Song
++import kotlin.random.Random
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFalse
++import kotlin.test.assertNotEquals
++import kotlin.test.assertTrue
++
++class AiMixEngineTest {
++
++    private fun song(id: String, artist: String, title: String = "title $id") =
++        Song(videoId = id, title = title, artist = artist, thumbnailUrl = null)
++
++    private fun cand(
++        id: String,
++        artist: String,
++        origin: AiMixOrigin = AiMixOrigin.HABIT_RADIO,
++        rank: Int = 0,
++    ) = AiMixCandidate(song(id, artist), origin, rank)
++
++    private fun build(
++        candidates: List<AiMixCandidate>,
++        mode: AiMixMode = AiMixMode.ForYou,
++        taste: AiMixTaste = AiMixTaste(),
++        size: Int = 30,
++        freshShare: Double = 1.0,
++        features: Map<String, AiMixFeatures> = emptyMap(),
++    ): List<Song> = AiMixEngine.build(
++        mode = mode,
++        taste = taste,
++        candidates = candidates,
++        size = size,
++        freshShare = freshShare,
++        features = features,
++        random = Random(42),
++    )
++
++    @Test
++    fun emptyCandidatesGiveAnEmptyMix() {
++        assertTrue(build(emptyList()).isEmpty())
++    }
++
++    @Test
++    fun theMixNeverExceedsTheRequestedSize() {
++        val candidates = (1..40).map { cand("v$it", "artist $it") }
++        assertEquals(10, build(candidates, size = 10).size)
++    }
++
++    @Test
++    fun theSameSongIsNotQueuedTwice() {
++        val candidates = listOf(
++            // Same video id.
++            AiMixCandidate(song("a", "X", title = "One"), AiMixOrigin.HABIT_RADIO),
++            AiMixCandidate(song("a", "X", title = "Other"), AiMixOrigin.HABIT_RADIO),
++            // Different id, same title and artist: a re-upload.
++            AiMixCandidate(song("b", "X", title = "One"), AiMixOrigin.GENRE_SEARCH),
++        )
++        assertEquals(1, build(candidates).size)
++    }
++
++    @Test
++    fun anArtistGetsAtMostTwoSlots() {
++        val candidates = (1..6).map { cand("a$it", "Artist A") } +
++            (1..2).map { cand("b$it", "Artist B") }
++        val mix = build(candidates, size = 10)
++        assertEquals(2, mix.count { it.artist == "Artist A" })
++        assertEquals(4, mix.size)
++    }
++
++    @Test
++    fun sameArtistIsNotPlayedBackToBackWhenItCanBeAvoided() {
++        val candidates = listOf(
++            cand("a1", "A"), cand("a2", "A"),
++            cand("b1", "B"), cand("b2", "B"),
++            cand("c1", "C"), cand("c2", "C"),
++        )
++        val mix = build(candidates, size = 6)
++        assertEquals(6, mix.size)
++        for (i in 1 until mix.size) {
++            assertNotEquals(mix[i - 1].artist, mix[i].artist, "positions ${i - 1} and $i")
++        }
++    }
++
++    @Test
++    fun aGenreMixPrefersArtistsKnownForThatGenre() {
++        val taste = AiMixTaste(
++            artistGenres = mapOf(
++                AiMixEngine.artistKey("Jazz One") to setOf("jazz"),
++                AiMixEngine.artistKey("Jazz Two") to setOf("jazz"),
++                AiMixEngine.artistKey("Jazz Three") to setOf("jazz"),
++                AiMixEngine.artistKey("Rock One") to setOf("rock"),
++                AiMixEngine.artistKey("Rock Two") to setOf("rock"),
++                AiMixEngine.artistKey("Rock Three") to setOf("rock"),
++            ),
++        )
++        val candidates = listOf(
++            cand("r1", "Rock One"), cand("r2", "Rock Two"), cand("r3", "Rock Three"),
++            cand("j1", "Jazz One"), cand("j2", "Jazz Two"), cand("j3", "Jazz Three"),
++        )
++        val mix = build(candidates, mode = AiMixMode.Genre("jazz"), taste = taste, size = 3)
++        assertEquals(setOf("j1", "j2", "j3"), mix.map { it.videoId }.toSet())
++    }
++
++    @Test
++    fun anArtistTheListenerPlaysOutranksAStranger() {
++        val taste = AiMixTaste(artistWeights = mapOf(AiMixEngine.artistKey("Loved") to 1.0))
++        val candidates = listOf(cand("s", "Stranger"), cand("l", "Loved"))
++        val mix = build(candidates, taste = taste, size = 1)
++        assertEquals("l", mix.single().videoId)
++    }
++
++    @Test
++    fun familiarSongsAreMixedInButDoNotLeadTheMix() {
++        val familiarIds = (1..4).map { "f$it" }
++        val taste = AiMixTaste(songPlays = familiarIds.associateWith { 5 })
++        val candidates = familiarIds.mapIndexed { i, id -> cand(id, "Known $i") } +
++            (1..8).map { cand("n$it", "New $it") }
++        val mix = build(candidates, taste = taste, size = 10, freshShare = 0.6)
++        assertEquals(10, mix.size)
++        assertEquals(4, mix.count { it.videoId in familiarIds })
++        assertFalse(mix.first().videoId in familiarIds)
++    }
++
++    @Test
++    fun whenThereAreNotEnoughNewSongsFamiliarOnesFillIn() {
++        val familiarIds = (1..8).map { "f$it" }
++        val taste = AiMixTaste(songPlays = familiarIds.associateWith { 3 })
++        val candidates = familiarIds.mapIndexed { i, id -> cand(id, "Known $i") } +
++            (1..2).map { cand("n$it", "New $it") }
++        val mix = build(candidates, taste = taste, size = 6, freshShare = 0.6)
++        assertEquals(6, mix.size)
++    }
++
++    @Test
++    fun arrangementAvoidsAJumpToAClashingKeyAndTempo() {
++        // s1 is the strongest candidate so it always opens the mix.
++        val candidates = listOf(
++            cand("s1", "A", AiMixOrigin.HABIT_RADIO),
++            cand("s2", "B", AiMixOrigin.GENRE_SEARCH),
++            cand("s3", "C", AiMixOrigin.GENRE_SEARCH),
++            cand("s4", "D", AiMixOrigin.GENRE_SEARCH),
++        )
++        val features = mapOf(
++            "s1" to AiMixFeatures(bpm = 120.0, key = "8A"),
++            "s2" to AiMixFeatures(bpm = 150.0, key = "3B"),
++            "s3" to AiMixFeatures(bpm = 120.0, key = "8A"),
++            "s4" to AiMixFeatures(bpm = 122.0, key = "9A"),
++        )
++        val mix = build(candidates, size = 4, features = features)
++        assertEquals("s1", mix.first().videoId)
++        assertNotEquals("s2", mix[1].videoId)
++    }
++
++    @Test
++    fun transitionCostPrefersSameKeyAndTempo() {
++        val base = AiMixFeatures(120.0, "8A")
++        assertEquals(0.0, AiMixEngine.transitionCost(base, base))
++        assertTrue(
++            AiMixEngine.transitionCost(base, AiMixFeatures(120.0, "9A")) <
++                AiMixEngine.transitionCost(base, AiMixFeatures(120.0, "3B")),
++        )
++    }
++
++    @Test
++    fun analyzerKeyNamesAreUnderstood() {
++        // A minor and C major are relative keys: the same slot on the wheel.
++        val minor = AiMixFeatures(120.0, "A minor")
++        val relativeMajor = AiMixFeatures(120.0, "C major")
++        assertEquals(0.1, AiMixEngine.transitionCost(minor, relativeMajor))
++        // And the same song's key written both ways is the same key.
++        assertEquals(
++            0.0,
++            AiMixEngine.transitionCost(minor, AiMixFeatures(120.0, "8A")),
++        )
++        // A fifth up in the same mode is one step round the wheel.
++        assertEquals(
++            0.1,
++            AiMixEngine.transitionCost(AiMixFeatures(120.0, "C major"), AiMixFeatures(120.0, "G major")),
++        )
++    }
++
++    @Test
++    fun anUnreadableKeyIsNeutralNotAnError() {
++        val known = AiMixFeatures(120.0, "8A")
++        val unknown = AiMixFeatures(120.0, "")
++        assertEquals(0.3, AiMixEngine.transitionCost(known, unknown))
++    }
++
++    @Test
++    fun halfTimeCountsAsTheSamePulse() {
++        assertEquals(
++            0.0,
++            AiMixEngine.transitionCost(AiMixFeatures(120.0, "8A"), AiMixFeatures(60.0, "8A")),
++        )
++    }
++
++    @Test
++    fun unknownSoundIsNeutral() {
++        assertEquals(0.5, AiMixEngine.transitionCost(null, AiMixFeatures(120.0, "8A")))
++        assertEquals(0.5, AiMixEngine.transitionCost(AiMixFeatures(120.0, "8A"), null))
++    }
++
++    @Test
++    fun surpriseNeverRepeatsTheExcludedGenre() {
++        val random = Random(1)
++        repeat(60) {
++            assertNotEquals("jazz", AiMixGenres.pickSurprise(random, except = "jazz").id)
++        }
++    }
++
++    @Test
++    fun genreSpellingsAreNormalised() {
++        assertEquals("hiphop", AiMixGenres.keyOf("Hip Hop"))
++        assertEquals("rnb", AiMixGenres.keyOf("R&B"))
++        assertEquals("kpop", AiMixGenres.keyOf("K Pop"))
++        assertEquals("lofi", AiMixGenres.keyOf("Lo-Fi"))
++    }
++
++    @Test
++    fun everyPickableGenreIsAlreadyInItsNormalForm() {
++        AiMixGenres.ALL.forEach { genre ->
++            assertEquals(genre.id, AiMixGenres.keyOf(genre.id), genre.label)
++        }
++    }
++}
+diff -ruN a/sharedUi/src/commonMain/composeResources/values/strings.xml b/sharedUi/src/commonMain/composeResources/values/strings.xml
+--- a/sharedUi/src/commonMain/composeResources/values/strings.xml	2026-10-30 10:44:21.500602060 +0000
++++ b/sharedUi/src/commonMain/composeResources/values/strings.xml	2026-10-30 10:44:21.496544021 +0000
+@@ -207,4 +207,14 @@
+     <string name="import_spotify">Import Spotify</string>
+     <string name="import_spotify_subtitle">From a playlist link</string>
+     <string name="sign_in_with_google">Sign in with Google</string>
++    <string name="ai_mix_title">AI Mix</string>
++    <string name="ai_mix_subtitle">Built from what you play, or from a genre</string>
++    <string name="ai_mix_for_you">For you</string>
++    <string name="ai_mix_surprise">Surprise me</string>
++    <string name="ai_mix_desc_for_you">Songs you are likely to like, picked from what you listen to and mixed to flow into each other.</string>
++    <string name="ai_mix_desc_surprise">AI picks any genre at random and mixes it for you.</string>
++    <string name="ai_mix_desc_genre">%1$s songs, mixed to flow into each other.</string>
++    <string name="ai_mix_start">Start mix</string>
++    <string name="ai_mix_busy">Mixing…</string>
++    <string name="ai_mix_failed">Could not build a mix. Check your connection and try again.</string>
+ </resources>
+diff -ruN a/sharedUi/src/commonMain/composeResources/values-vi/strings.xml b/sharedUi/src/commonMain/composeResources/values-vi/strings.xml
+--- a/sharedUi/src/commonMain/composeResources/values-vi/strings.xml	2026-10-30 10:44:21.492348249 +0000
++++ b/sharedUi/src/commonMain/composeResources/values-vi/strings.xml	2026-10-30 10:44:21.488222257 +0000
+@@ -200,4 +200,14 @@
+     <string name="search_library_empty">Tìm các bài hát trong thư mục Nhạc cục bộ của bạn.</string>
+     <string name="search_library_hint">Bài hát, nghệ sĩ và album</string>
+     <string name="search_library_no_results">Không có gì trong Nhạc cục bộ khớp với “%1$s”.</string>
++    <string name="ai_mix_title">AI Mix</string>
++    <string name="ai_mix_subtitle">Mix theo gu nghe của bạn hoặc theo thể loại</string>
++    <string name="ai_mix_for_you">Cho bạn</string>
++    <string name="ai_mix_surprise">Ngẫu nhiên</string>
++    <string name="ai_mix_desc_for_you">Những bài bạn có thể thích, chọn từ thói quen nghe của bạn và mix liền mạch.</string>
++    <string name="ai_mix_desc_surprise">AI tự chọn một thể loại bất kỳ rồi mix cho bạn.</string>
++    <string name="ai_mix_desc_genre">Nhạc %1$s, được mix liền mạch.</string>
++    <string name="ai_mix_start">Tạo mix</string>
++    <string name="ai_mix_busy">Đang mix…</string>
++    <string name="ai_mix_failed">Không tạo được mix. Kiểm tra mạng rồi thử lại.</string>
+ </resources>
+diff -ruN a/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/screens/AiMixSection.kt b/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/screens/AiMixSection.kt
+--- a/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/screens/AiMixSection.kt	1970-01-01 00:00:00.000000000 +0000
++++ b/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/screens/AiMixSection.kt	2026-10-30 10:44:21.504835520 +0000
+@@ -0,0 +1,187 @@
++package com.music.bitchord.ui.screens
++
++import androidx.compose.foundation.background
++import androidx.compose.foundation.clickable
++import androidx.compose.foundation.layout.Arrangement
++import androidx.compose.foundation.layout.Box
++import androidx.compose.foundation.layout.Column
++import androidx.compose.foundation.layout.PaddingValues
++import androidx.compose.foundation.layout.Row
++import androidx.compose.foundation.layout.Spacer
++import androidx.compose.foundation.layout.fillMaxWidth
++import androidx.compose.foundation.layout.height
++import androidx.compose.foundation.layout.padding
++import androidx.compose.foundation.layout.size
++import androidx.compose.foundation.layout.width
++import androidx.compose.foundation.lazy.items
++import androidx.compose.foundation.shape.CircleShape
++import androidx.compose.foundation.shape.RoundedCornerShape
++import androidx.compose.material3.CircularProgressIndicator
++import androidx.compose.material3.MaterialTheme
++import androidx.compose.material3.Text
++import androidx.compose.runtime.Composable
++import androidx.compose.runtime.getValue
++import androidx.compose.runtime.mutableStateOf
++import androidx.compose.runtime.remember
++import androidx.compose.runtime.setValue
++import androidx.compose.ui.Alignment
++import androidx.compose.ui.Modifier
++import androidx.compose.ui.draw.clip
++import androidx.compose.ui.graphics.Brush
++import androidx.compose.ui.text.style.TextOverflow
++import androidx.compose.ui.unit.dp
++import com.music.bitchord.playback.smart.AiMixGenres
++import com.music.bitchord.playback.smart.AiMixMode
++import com.music.bitchord.sharedui.resources.*
++import com.music.bitchord.ui.components.PAGE_GUTTER
++import com.music.bitchord.ui.components.ShelfRow
++import org.jetbrains.compose.resources.stringResource
++
++/**
++ * The Home feed's AI Mix section: pick what to mix from — the listener's own
++ * habits, any genre the AI picks at random, or one genre by hand — and start it.
++ *
++ * Stateless about the mix itself. [busy] and [failed] come from whoever builds
++ * it, and [onStart] is told which kind of mix was asked for. Only the chip
++ * selection lives here, because nothing outside needs to know it until Start.
++ */
++@Composable
++fun AiMixSection(
++    busy: Boolean,
++    failed: Boolean,
++    onStart: (AiMixMode) -> Unit,
++    modifier: Modifier = Modifier,
++) {
++    var selected by remember { mutableStateOf<AiMixMode>(AiMixMode.ForYou) }
++
++    Column(modifier = modifier.fillMaxWidth()) {
++        SectionHeader(
++            title = stringResource(Res.string.ai_mix_title),
++            subtitle = stringResource(Res.string.ai_mix_subtitle),
++        )
++
++        ShelfRow(
++            contentPadding = PaddingValues(horizontal = PAGE_GUTTER),
++            horizontalArrangement = Arrangement.spacedBy(8.dp),
++        ) {
++            item(key = "ai-mix-for-you") {
++                MixChip(
++                    label = stringResource(Res.string.ai_mix_for_you),
++                    selected = selected is AiMixMode.ForYou,
++                    onClick = { selected = AiMixMode.ForYou },
++                )
++            }
++            item(key = "ai-mix-surprise") {
++                MixChip(
++                    label = stringResource(Res.string.ai_mix_surprise),
++                    selected = selected is AiMixMode.Surprise,
++                    onClick = { selected = AiMixMode.Surprise },
++                )
++            }
++            items(AiMixGenres.ALL, key = { "ai-mix-genre-${it.id}" }) { genre ->
++                MixChip(
++                    label = genre.label,
++                    selected = (selected as? AiMixMode.Genre)?.id == genre.id,
++                    onClick = { selected = AiMixMode.Genre(genre.id) },
++                )
++            }
++        }
++
++        val description = when (val mode = selected) {
++            is AiMixMode.ForYou -> stringResource(Res.string.ai_mix_desc_for_you)
++            is AiMixMode.Surprise -> stringResource(Res.string.ai_mix_desc_surprise)
++            is AiMixMode.Genre -> stringResource(
++                Res.string.ai_mix_desc_genre,
++                AiMixGenres.byId(mode.id)?.label ?: mode.id,
++            )
++        }
++
++        Box(
++            modifier = Modifier
++                .padding(horizontal = PAGE_GUTTER, vertical = 12.dp)
++                .fillMaxWidth()
++                .clip(RoundedCornerShape(20.dp))
++                .background(
++                    Brush.linearGradient(
++                        listOf(
++                            MaterialTheme.colorScheme.primaryContainer,
++                            MaterialTheme.colorScheme.tertiaryContainer,
++                        ),
++                    ),
++                ),
++        ) {
++            Column(modifier = Modifier.padding(16.dp)) {
++                Text(
++                    text = description,
++                    style = MaterialTheme.typography.bodyMedium,
++                    color = MaterialTheme.colorScheme.onPrimaryContainer,
++                    maxLines = 3,
++                    overflow = TextOverflow.Ellipsis,
++                )
++                Spacer(Modifier.height(14.dp))
++                Row(verticalAlignment = Alignment.CenterVertically) {
++                    Box(
++                        modifier = Modifier
++                            .clip(CircleShape)
++                            .background(MaterialTheme.colorScheme.primary)
++                            .clickable(enabled = !busy) { onStart(selected) }
++                            .padding(horizontal = 22.dp, vertical = 10.dp),
++                    ) {
++                        Text(
++                            text = stringResource(
++                                if (busy) Res.string.ai_mix_busy else Res.string.ai_mix_start,
++                            ),
++                            style = MaterialTheme.typography.titleSmall,
++                            color = MaterialTheme.colorScheme.onPrimary,
++                        )
++                    }
++                    if (busy) {
++                        Spacer(Modifier.width(12.dp))
++                        CircularProgressIndicator(
++                            modifier = Modifier.size(20.dp),
++                            strokeWidth = 2.dp,
++                            color = MaterialTheme.colorScheme.onPrimaryContainer,
++                        )
++                    }
++                }
++                if (failed && !busy) {
++                    Spacer(Modifier.height(10.dp))
++                    Text(
++                        text = stringResource(Res.string.ai_mix_failed),
++                        style = MaterialTheme.typography.bodySmall,
++                        color = MaterialTheme.colorScheme.error,
++                    )
++                }
++            }
++        }
++    }
++}
++
++/** A selectable pill. Drawn by hand, like the rest of the Home feed's controls. */
++@Composable
++private fun MixChip(label: String, selected: Boolean, onClick: () -> Unit) {
++    val container = if (selected) {
++        MaterialTheme.colorScheme.primary
++    } else {
++        MaterialTheme.colorScheme.surfaceVariant
++    }
++    val content = if (selected) {
++        MaterialTheme.colorScheme.onPrimary
++    } else {
++        MaterialTheme.colorScheme.onSurfaceVariant
++    }
++    Box(
++        modifier = Modifier
++            .clip(CircleShape)
++            .background(container)
++            .clickable(onClick = onClick)
++            .padding(horizontal = 16.dp, vertical = 8.dp),
++    ) {
++        Text(
++            text = label,
++            style = MaterialTheme.typography.labelLarge,
++            color = content,
++            maxLines = 1,
++        )
++    }
++}
+diff -ruN a/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/screens/HomeScreen.kt b/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/screens/HomeScreen.kt
+--- a/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/screens/HomeScreen.kt	2026-10-30 10:44:21.513135514 +0000
++++ b/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/screens/HomeScreen.kt	2026-10-30 10:44:21.508863543 +0000
+@@ -142,6 +142,11 @@
+     leadHero: Boolean = true,
+     currentSong: Song? = null,
+     isPlaying: Boolean = false,
++    /**
++     * A section placed after the feed's first shelf, or null for none. Home
++     * passes the AI Mix section here; Explore does not.
++     */
++    aiMixSection: (@Composable () -> Unit)? = null,
+ ) {
+     val recentsViewType by AppUi.host.homeRecentsViewType.collectAsStateWithLifecycle()
+ 
+@@ -202,6 +207,7 @@
+                         currentSong = currentSong,
+                         isPlaying = isPlaying,
+                         firstIsHero = leadHero && !recentlyPlayedLoading,
++                        afterFirst = aiMixSection,
+                         recentsViewType = recentsViewType,
+                         onRecentsViewTypeToggle = {
+                             AppUi.host.setHomeRecentsViewType(
+@@ -250,9 +256,14 @@
+     currentSong: Song?,
+     isPlaying: Boolean,
+     firstIsHero: Boolean = true,
++    afterFirst: (@Composable () -> Unit)? = null,
+     recentsViewType: LibraryViewType,
+     onRecentsViewTypeToggle: () -> Unit,
+ ) {
++    // With no shelves there is no "first", but the section is still wanted.
++    if (shelves.isEmpty() && afterFirst != null) {
++        item(key = AFTER_FIRST_KEY) { afterFirst() }
++    }
+     shelves.forEachIndexed { index, shelf ->
+         item(key = shelf.title + index) {
+             val openItem: (ShelfItem) -> Unit = { item -> onItemClick(item, shelf.title) }
+@@ -284,9 +295,15 @@
+                 )
+             }
+         }
++        if (index == 0 && afterFirst != null) {
++            item(key = AFTER_FIRST_KEY) { afterFirst() }
++        }
+     }
+ }
+ 
++/** The key of the section slotted in after the first shelf. Not a title, so no shelf can clash with it. */
++private const val AFTER_FIRST_KEY = "home-after-first"
++
+ /** The same four-rows-per-page treatment used by an artist's Top songs. */
+ @Composable
+ private fun RecentShelf(
