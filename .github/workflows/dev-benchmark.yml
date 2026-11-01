@@ -15,7 +15,14 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - run: chmod +x gradlew
       - run: ./gradlew assembleDevBenchmark
+
+      - name: List APKs
+        if: always()
+        run: find . -name "*.apk" -not -path "*/node_modules/*"
+
       - uses: actions/upload-artifact@v4
         with:
           name: bitchord-dev-benchmark
-          path: app/build/outputs/apk/dev/benchmark/*.apk
+          path: |
+            **/build/outputs/apk/**/*.apk
+          if-no-files-found: error
