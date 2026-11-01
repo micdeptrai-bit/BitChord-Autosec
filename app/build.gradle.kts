@@ -185,7 +185,7 @@ android {
         create("benchmark") {
             initWith(getByName("release"))
             signingConfig = signingConfigs.getByName("debug")
-            applicationIdSuffix = ".benchmark"
+            applicationIdSuffix = ".benchmark2"
             matchingFallbacks += listOf("release")
         }
     }
