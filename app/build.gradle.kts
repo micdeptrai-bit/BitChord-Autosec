@@ -182,7 +182,7 @@ android {
          * build is interpreted and verified at runtime and says little about
          * either. `./gradlew installDevBenchmark`.
          */
-        create("benchmark") {
+        create("benchmark2") {
             initWith(getByName("release"))
             signingConfig = signingConfigs.getByName("debug")
             applicationIdSuffix = ".benchmark2"
