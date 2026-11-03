@@ -1,0 +1,88 @@
+name: Automix - Nut Mix tren trinh phat (build APK)
+
+# Chay tay: tab Actions -> chon workflow nay -> Run workflow.
+# Them nut Mix (icon lap lanh) vao nhom nut shuffle/repeat/autoplay cua trinh phat
+# (mo hang doi de thay). Bam vao se mo popup chinh Automix ngay tai trinh phat:
+#   - Bat/tat Automix
+#   - Hieu nang phan tich: Tiet kiem / Can bang / Hieu nang
+#   - Do dai crossfade 0-12s (khi Automix tat)
+#   - Nut "Xem doan mix hien tai" khi dang co mot doan mix
+# Workflow ghep ban va vao ban sao tam cua repo tren may chu roi build.
+# Khong commit gi vao repo cua ban.
+#
+# Build "benchmark": co R8, khong debuggable, ky bang khoa debug, goi rieng
+# com.dev.bitchord.benchmark2 nen cai song song voi ban dev/prod.
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: "Loai build"
+        type: choice
+        options:
+          - benchmark (nhanh, muot, giong ban phat hanh)
+          - debug (build nhanh hon, chay cham hon)
+        default: "benchmark (nhanh, muot, giong ban phat hanh)"
+      run_tests:
+        description: "Chay them test truoc khi build (lau hon)"
+        type: boolean
+        default: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply the Mix button patch
+        run: |
+          echo "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" | base64 -d | gunzip > mix-button.patch
+          patch -p1 --dry-run < mix-button.patch
+          patch -p1 < mix-button.patch
+          rm -f mix-button.patch *.orig *.rej
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Write local.properties
+        run: |
+          echo "LASTFM_API_KEY=" > local.properties
+          echo "LASTFM_SECRET=" >> local.properties
+          echo "LISTEN_TOGETHER_SERVER=" >> local.properties
+
+      - run: chmod +x gradlew
+
+      - name: Shared tests
+        if: ${{ inputs.run_tests }}
+        run: ./gradlew :shared:jvmTest
+
+      - name: Build the APK
+        run: |
+          if [[ "${{ inputs.build_type }}" == debug* ]]; then
+            ./gradlew assembleDevDebug
+          else
+            ./gradlew assembleDevBenchmark
+          fi
+
+      - name: List the APKs
+        run: find app/build/outputs/apk/dev -name "*.apk" -exec ls -la {} \;
+
+      - name: Upload the arm64 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitchord-dev-mix-button-arm64
+          path: app/build/outputs/apk/dev/*/*arm64-v8a*.apk
+          if-no-files-found: error
+
+      - name: Upload all APKs (fallback)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitchord-dev-mix-button-all
+          path: app/build/outputs/apk/dev/*/*.apk
+          if-no-files-found: error
