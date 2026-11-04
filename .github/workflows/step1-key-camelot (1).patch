@@ -1,0 +1,293 @@
+diff -ruN -x '*.onnx' orig/BitChord-Autosec-main/app/src/main/cpp/jni/analysis_jni.cpp BitChord-Autosec-main/app/src/main/cpp/jni/analysis_jni.cpp
+--- orig/BitChord-Autosec-main/app/src/main/cpp/jni/analysis_jni.cpp	2026-11-03 09:11:14.000000000 +0000
++++ BitChord-Autosec-main/app/src/main/cpp/jni/analysis_jni.cpp	2026-11-04 02:56:10.796122868 +0000
+@@ -42,14 +42,17 @@
+ 
+ namespace {
+ 
+-// The analyzer's strings are its own literals -- key names like "C# minor"
+-// and candidate types like "main_drop" -- so they are known ASCII with
+-// nothing to escape. Anything unexpected is dropped rather than emitted
+-// unescaped.
++// The analyzer's strings are its own literals -- key names like "C♯ minor"
++// and candidate types like "main_drop". The key names carry UTF-8 accidentals
++// (♯ ♭), so bytes with the high bit set pass through untouched: dropping them
++// turned "C♯ minor" into "C minor" and "E♭ major" into "E major", a key off by
++// a semitone before anything compared it. Control characters, quotes and
++// backslashes are still dropped rather than emitted unescaped.
+ void AppendString(std::string& out, const std::string& value) {
+   out += '"';
+   for (const char character : value) {
+-    if (character >= 32 && character < 127 && character != '"' && character != '\\') {
++    const auto byte = static_cast<unsigned char>(character);
++    if (byte >= 0x80 || (byte >= 32 && byte < 127 && character != '"' && character != '\\')) {
+       out += character;
+     }
+   }
+diff -ruN -x '*.onnx' orig/BitChord-Autosec-main/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/TransitionPlanner.kt BitChord-Autosec-main/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/TransitionPlanner.kt
+--- orig/BitChord-Autosec-main/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/TransitionPlanner.kt	2026-11-03 09:11:14.000000000 +0000
++++ BitChord-Autosec-main/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/TransitionPlanner.kt	2026-11-04 02:56:10.795732473 +0000
+@@ -342,22 +342,69 @@
+     return KEY_INDEX[parts.firstOrNull()] to parts.getOrNull(1)
+ }
+ 
+-private fun keyDistance(left: String, right: String): Int? {
+-    val (leftIndex, leftMode) = splitKey(left)
+-    val (rightIndex, rightMode) = splitKey(right)
+-    if (leftIndex == null || rightIndex == null) return null
+-    val pitchDistance = min((leftIndex - rightIndex + 12) % 12, (rightIndex - leftIndex + 12) % 12)
+-    return pitchDistance + if (leftMode != null && rightMode != null && leftMode != rightMode) 1 else 0
+-}
+-
+-private fun harmonicallyCompatible(left: String, right: String): Boolean {
+-    val (leftIndex, leftMode) = splitKey(left)
+-    val (rightIndex, rightMode) = splitKey(right)
+-    if (leftIndex == null || rightIndex == null) return false
+-    val distance = min((leftIndex - rightIndex + 12) % 12, (rightIndex - leftIndex + 12) % 12)
+-    if (leftMode != null && rightMode != null && leftMode != rightMode) return distance <= 1
+-    // A fifth is as close as a second here: it is the move every DJ makes.
+-    return distance <= 2 || distance == 5
++/** True for minor, false for major, null when the mode word is missing or unreadable. */
++private fun isMinorMode(mode: String?): Boolean? = when (mode?.lowercase()) {
++    "minor", "min", "m" -> true
++    "major", "maj" -> false
++    else -> null
++}
++
++/**
++ * A key's place on the Camelot wheel: its number 1..12 and whether it is the
++ * minor ("A") or major ("B") ring. Null when the key cannot be read.
++ *
++ * Numbers climb a fifth at a time (8B = C, 9B = G, 7B = F), and a minor key
++ * shares the number of its relative major (8A = A minor, next to 8B = C
++ * major). A key with no mode word is read in [fallbackMinor]'s mode, so that
++ * a bare "C" is compared with the other key's mode rather than guessed.
++ */
++internal data class Camelot(val number: Int, val minor: Boolean)
++
++internal fun camelotOf(key: String, fallbackMinor: Boolean = false): Camelot? {
++    val (index, modeWord) = splitKey(key)
++    if (index == null) return null
++    val minor = isMinorMode(modeWord) ?: fallbackMinor
++    // The relative major of a minor key sits a minor third above it.
++    val majorRoot = if (minor) (index + 3) % 12 else index
++    val number = (majorRoot * 7) % 12
++    return Camelot(number = (number + 7) % 12 + 1, minor = minor)
++}
++
++private fun camelotPair(left: String, right: String): Pair<Camelot, Camelot>? {
++    val leftMode = isMinorMode(splitKey(left).second)
++    val rightMode = isMinorMode(splitKey(right).second)
++    val a = camelotOf(left, fallbackMinor = rightMode ?: false) ?: return null
++    val b = camelotOf(right, fallbackMinor = leftMode ?: false) ?: return null
++    return a to b
++}
++
++/** Steps between two Camelot numbers round the wheel, 0..6. */
++private fun wheelSteps(a: Int, b: Int): Int {
++    val gap = abs(a - b) % 12
++    return min(gap, 12 - gap)
++}
++
++/**
++ * How far apart two keys sit on the Camelot wheel: the steps round the wheel,
++ * plus one when the rings differ and the numbers do not already match (a
++ * relative pair is one move, not two). Null when either key cannot be read.
++ */
++internal fun keyDistance(left: String, right: String): Int? {
++    val (a, b) = camelotPair(left, right) ?: return null
++    val steps = wheelSteps(a.number, b.number)
++    return steps + if (a.minor != b.minor && steps != 0) 1 else 0
++}
++
++/**
++ * Keys that may share a bar. On the Camelot wheel that is the same key, its
++ * relative (same number, other ring) and the fifth either side (number +-1,
++ * same ring). A semitone, a tone or a tritone apart all fall outside, even
++ * though a count of semitones would have waved some of them through.
++ */
++internal fun harmonicallyCompatible(left: String, right: String): Boolean {
++    val (a, b) = camelotPair(left, right) ?: return false
++    val steps = wheelSteps(a.number, b.number)
++    return if (a.minor == b.minor) steps <= 1 else steps == 0
+ }
+ 
+ /** A key the analyzer was not confident about is no key at all. */
+@@ -1292,10 +1339,15 @@
+ 
+     val ratio = normalizedTempoRatio(currentBpm, nextBpm)
+     val transitionBeats = if (traits == null) {
+-        val distance = keyDistance(trustedKey(analysis), trustedKey(nextAnalysis))
++        val left = trustedKey(analysis)
++        val right = trustedKey(nextAnalysis)
++        val keyClash = left.isNotEmpty() && right.isNotEmpty() && !harmonicallyCompatible(left, right)
+         val vocalConflict = analysis.vocalProbability >= VOCAL_CONFLICT_PROBABILITY &&
+             nextAnalysis.vocalProbability >= VOCAL_CONFLICT_PROBABILITY
+-        if (!vocalConflict && (abs(1 - ratio) > 0.07 || (distance != null && distance > 4))) 16 else 8
++        // Only tempo earns the long ride here. A key clash used to, which
++        // drew out exactly the pairs that sound worst; it now shortens like
++        // the advanced path does.
++        if (!vocalConflict && !keyClash && abs(1 - ratio) > 0.07) 16 else 8
+     } else {
+         // Tempo alone keeps the long ride: the one-kick bass handover is what
+         // stops two unmatched grids flamming. Unmatched fallbacks deliberately
+diff -ruN -x '*.onnx' orig/BitChord-Autosec-main/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/KeyCompatibilityTest.kt BitChord-Autosec-main/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/KeyCompatibilityTest.kt
+--- orig/BitChord-Autosec-main/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/KeyCompatibilityTest.kt	1970-01-01 00:00:00.000000000 +0000
++++ BitChord-Autosec-main/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/KeyCompatibilityTest.kt	2026-11-04 02:56:39.386383881 +0000
+@@ -0,0 +1,156 @@
++package com.music.bitchord.playback.smart
++
++import kotlin.test.Test
++import kotlin.test.assertEquals
++import kotlin.test.assertFalse
++import kotlin.test.assertNull
++import kotlin.test.assertTrue
++
++/**
++ * Key compatibility on the Camelot wheel: same key, relative major/minor and a
++ * fifth either side mix; a semitone, a tone or a tritone do not. The analyzer
++ * names keys like "C♯ minor" and "E♭ major" (UTF-8 accidentals, no flats for C♯).
++ */
++class KeyCompatibilityTest {
++
++    private fun compatible(a: String, b: String) = harmonicallyCompatible(a, b)
++
++    // --- the wheel itself -------------------------------------------------
++
++    @Test
++    fun camelotCodesMatchTheWheel() {
++        assertEquals(Camelot(8, minor = false), camelotOf("C major"))
++        assertEquals(Camelot(8, minor = true), camelotOf("A minor"))
++        assertEquals(Camelot(9, minor = false), camelotOf("G major"))
++        assertEquals(Camelot(7, minor = false), camelotOf("F major"))
++        assertEquals(Camelot(1, minor = false), camelotOf("B major"))
++        assertEquals(Camelot(5, minor = true), camelotOf("C minor"))
++        assertEquals(Camelot(12, minor = true), camelotOf("C♯ minor"))
++        assertEquals(Camelot(2, minor = false), camelotOf("F♯ major"))
++        assertEquals(Camelot(5, minor = false), camelotOf("E♭ major"))
++        assertEquals(Camelot(2, minor = true), camelotOf("E♭ minor"))
++    }
++
++    @Test
++    fun enharmonicSpellingsLandOnTheSameCode() {
++        assertEquals(camelotOf("C♯ major"), camelotOf("D♭ major"))
++        assertEquals(camelotOf("F♯ minor"), camelotOf("G♭ minor"))
++    }
++
++    // --- compatible pairs -------------------------------------------------
++
++    @Test
++    fun sameKeyMixes() {
++        assertTrue(compatible("A minor", "A minor"))
++        assertTrue(compatible("E♭ major", "E♭ major"))
++    }
++
++    @Test
++    fun relativePairMixes() {
++        assertTrue(compatible("C major", "A minor"))
++        assertTrue(compatible("A minor", "C major"))
++        assertTrue(compatible("E♭ major", "C minor"))
++        assertTrue(compatible("F♯ minor", "A major"))
++    }
++
++    @Test
++    fun fifthEitherSideMixesInTheSameMode() {
++        assertTrue(compatible("C major", "G major"))
++        assertTrue(compatible("C major", "F major"))
++        assertTrue(compatible("A minor", "E minor"))
++        assertTrue(compatible("A minor", "D minor"))
++    }
++
++    @Test
++    fun wheelWrapsAroundAtTwelve() {
++        // B major is 1B and E major is 12B: neighbours across the seam.
++        assertTrue(compatible("B major", "E major"))
++        assertTrue(compatible("E major", "B major"))
++        // C♯ minor is 12A, G♯ minor is 1A.
++        assertTrue(compatible("C♯ minor", "G♯ minor"))
++    }
++
++    // --- clashing pairs ---------------------------------------------------
++
++    @Test
++    fun semitoneApartClashes() {
++        assertFalse(compatible("C major", "C♯ major"))
++        assertFalse(compatible("A minor", "B♭ minor"))
++        assertFalse(compatible("C major", "B major"))
++    }
++
++    @Test
++    fun wholeToneApartClashes() {
++        // Two moves round the wheel, which a semitone count let through.
++        assertFalse(compatible("C major", "D major"))
++        assertFalse(compatible("A minor", "B minor"))
++    }
++
++    @Test
++    fun tritoneClashes() {
++        assertFalse(compatible("C major", "F♯ major"))
++        assertFalse(compatible("A minor", "E♭ minor"))
++    }
++
++    @Test
++    fun neighbourOnTheOtherRingClashes() {
++        // 8B against 7A and 8B against 8A: only the second, the relative, is one move.
++        assertFalse(compatible("C major", "D minor"))
++        assertFalse(compatible("C major", "E minor"))
++        assertTrue(compatible("C major", "A minor"))
++    }
++
++    @Test
++    fun compatibilityIsSymmetric() {
++        val keys = listOf(
++            "C major", "C♯ major", "D major", "E♭ major", "E major", "F major",
++            "F♯ major", "G major", "A♭ major", "A major", "B♭ major", "B major",
++            "C minor", "C♯ minor", "D minor", "E♭ minor", "E minor", "F minor",
++            "F♯ minor", "G minor", "G♯ minor", "A minor", "B♭ minor", "B minor",
++        )
++        for (a in keys) for (b in keys) {
++            assertEquals(compatible(a, b), compatible(b, a), "$a vs $b")
++        }
++    }
++
++    @Test
++    fun eachKeyHasExactlyThreeFriends() {
++        val keys = listOf(
++            "C major", "C♯ major", "D major", "E♭ major", "E major", "F major",
++            "F♯ major", "G major", "A♭ major", "A major", "B♭ major", "B major",
++            "C minor", "C♯ minor", "D minor", "E♭ minor", "E minor", "F minor",
++            "F♯ minor", "G minor", "G♯ minor", "A minor", "B♭ minor", "B minor",
++        )
++        for (a in keys) {
++            val friends = keys.count { it != a && compatible(a, it) }
++            assertEquals(3, friends, "$a")
++        }
++    }
++
++    // --- unreadable input -------------------------------------------------
++
++    @Test
++    fun unreadableKeyIsNeverCompatible() {
++        assertFalse(compatible("", "C major"))
++        assertFalse(compatible("C major", "H major"))
++        assertNull(keyDistance("", "C major"))
++    }
++
++    @Test
++    fun missingModeTakesTheOtherKeysMode() {
++        assertTrue(compatible("C", "G major"))
++        assertTrue(compatible("A minor", "E"))
++    }
++
++    // --- distance ---------------------------------------------------------
++
++    @Test
++    fun distanceCountsWheelMovesNotSemitones() {
++        assertEquals(0, keyDistance("C major", "C major"))
++        assertEquals(0, keyDistance("C major", "A minor"))
++        assertEquals(1, keyDistance("C major", "G major"))
++        assertEquals(2, keyDistance("C major", "D major"))
++        assertEquals(6, keyDistance("C major", "F♯ major"))
++        assertEquals(keyDistance("G major", "C major"), keyDistance("C major", "G major"))
++    }
++}
