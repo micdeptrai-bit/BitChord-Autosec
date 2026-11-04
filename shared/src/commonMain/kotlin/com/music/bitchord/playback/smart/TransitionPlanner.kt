@@ -337,7 +337,7 @@ private fun normalizedTempoRatio(currentBpm: Double, nextBpm: Double): Double {
     return ratio
 }
 
-private fun splitKey(key: String): Pair<Int?, String?> {
+internal fun splitKey(key: String): Pair<Int?, String?> {
     val parts = key.trim().split(' ')
     return KEY_INDEX[parts.firstOrNull()] to parts.getOrNull(1)
 }
@@ -350,7 +350,38 @@ private fun keyDistance(left: String, right: String): Int? {
     return pitchDistance + if (leftMode != null && rightMode != null && leftMode != rightMode) 1 else 0
 }
 
-private fun harmonicallyCompatible(left: String, right: String): Boolean {
+/**
+ * A key's place on the Camelot wheel: its number (1..12) and whether it is a minor ("A") key,
+ * or null for a key whose root or mode is not recognised.
+ */
+internal fun camelotWheelPosition(key: String): Pair<Int, Boolean>? {
+    val (index, mode) = splitKey(key)
+    if (index == null) return null
+    val minor = when (mode?.lowercase()) {
+        "minor" -> true
+        "major" -> false
+        else -> return null
+    }
+    // A minor key sits on its relative major's number (A minor with C major, at 8).
+    val majorRoot = if (minor) (index + 3) % 12 else index
+    return ((majorRoot * 7) % 12 + 7) % 12 + 1 to minor
+}
+
+/**
+ * Whether two keys mix without clashing: the same Camelot number (same key, or relative
+ * major/minor) or one step round the wheel in the same mode. Pitch distance alone called a
+ * whole tone apart compatible, which is a clash; two keys a fifth apart are one wheel step.
+ * A key with no recognisable mode falls back to the pitch distance.
+ */
+internal fun harmonicallyCompatible(left: String, right: String): Boolean {
+    val wheelLeft = camelotWheelPosition(left)
+    val wheelRight = camelotWheelPosition(right)
+    if (wheelLeft != null && wheelRight != null) {
+        if (wheelLeft.first == wheelRight.first) return true
+        if (wheelLeft.second != wheelRight.second) return false
+        val step = (wheelLeft.first - wheelRight.first + 12) % 12
+        return step == 1 || step == 11
+    }
     val (leftIndex, leftMode) = splitKey(left)
     val (rightIndex, rightMode) = splitKey(right)
     if (leftIndex == null || rightIndex == null) return false

@@ -174,6 +174,17 @@ object LoopMix {
         why: StringBuilder? = null,
     ): Plan? {
         if (outVideo || inVideo) return null.also { why?.append("a music video") }
+        // The loop is cut on the grid, so the grid has to be one the policy would beat-match on.
+        // Without this a track with no confidence at all (a metadata BPM, a failed model) was
+        // looped on a guess, because only the tempo was ever read.
+        val outConfidence = (out.tailBeats?.confidence ?: out.beatConfidence).orZero()
+        if (outConfidence < MIN_BEATMATCH_CONFIDENCE) {
+            return null.also { why?.append("outgoing grid not trusted (${(outConfidence * 100).roundToInt()}%)") }
+        }
+        val inConfidence = (inn.headBeats?.confidence ?: inn.beatConfidence).orZero()
+        if (inConfidence < MIN_BEATMATCH_CONFIDENCE) {
+            return null.also { why?.append("incoming grid not trusted (${(inConfidence * 100).roundToInt()}%)") }
+        }
         val outGrid = constantGrid(out) ?: return null.also { why?.append("no grid on the outgoing song") }
         val inGrid = constantGrid(inn) ?: return null.also { why?.append("no grid on the incoming song") }
         val outCount = Rejections()

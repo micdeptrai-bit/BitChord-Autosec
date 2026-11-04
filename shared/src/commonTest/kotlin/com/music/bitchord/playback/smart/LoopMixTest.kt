@@ -308,4 +308,22 @@ class LoopMixTest {
     fun noMaskAndNoLyricsMeansNoLoop() {
         assertNull(plan(analysis(120.0, 200.0), analysis(120.0, 180.0), null, null))
     }
+
+    @Test
+    fun aGridBelowTheBeatMatchGateGetsNoLoopMix() {
+        val shaky = MIN_BEATMATCH_CONFIDENCE - 0.01
+        val trusted = analysis(120.0, 180.0)
+        assertNull(plan(analysis(120.0, 200.0).copy(beatConfidence = shaky), trusted))
+        assertNull(plan(trusted.copy(duration = 200.0), analysis(120.0, 180.0).copy(beatConfidence = shaky)))
+        assertNotNull(plan(analysis(120.0, 200.0).copy(beatConfidence = MIN_BEATMATCH_CONFIDENCE), trusted))
+    }
+
+    @Test
+    fun theSidesOwnGridConfidenceDecidesNotTheWholeTracks() {
+        // Trusted over the whole track, but the model found a poor grid over the last minute.
+        val out = analysis(120.0, 200.0).copy(tailBeats = BeatSide(emptyList(), emptyList(), 120.0, 0.3))
+        val why = StringBuilder()
+        assertNull(LoopMix.plan(out, 200.0, analysis(120.0, 180.0), 180.0, 0.0, clear, clear, why = why))
+        assertTrue(why.contains("outgoing grid not trusted"), why.toString())
+    }
 }

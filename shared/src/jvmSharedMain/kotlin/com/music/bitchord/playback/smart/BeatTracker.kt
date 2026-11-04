@@ -149,9 +149,12 @@ class BeatTracker(
             bpm = bpm,
             beatInterval = 60 / bpm,
             firstBeat = beats.first(),
-            beatConfidence = gridConfidence(
-                beats,
-                beatFrames.map { frame -> beatLogits.getOrElse(frame.roundToInt()) { 0f }.toDouble() },
+            beatConfidence = capForMeter(
+                gridConfidence(
+                    beats,
+                    beatFrames.map { frame -> beatLogits.getOrElse(frame.roundToInt()) { 0f }.toDouble() },
+                ),
+                beatsPerBar(beats, downbeats),
             ),
         )
     }
@@ -241,6 +244,16 @@ class BeatTracker(
         /** A frame is a beat when it is the maximum of a seven-frame window and its logit positive. */
         private const val PEAK_WINDOW = 7
         private const val MIN_BEATS = 8
+
+        /** Downbeats needed before the model's meter is believed (three bars). */
+        private const val MIN_DOWNBEATS_FOR_METER = 4
+
+        /**
+         * Confidence ceiling for a grid whose bars are not four beats long. Below
+         * [MIN_DJ_CONFIDENCE] on purpose: the planner, the phrase plans and the loop mix all count
+         * bars as four beats, so a 3/4 or 6/8 grid is not a grid they can cut on.
+         */
+        const val NON_FOUR_FOUR_CONFIDENCE_CAP = MIN_DJ_CONFIDENCE * 0.75
 
         /** Plausible musical tempo, used only to reject a grid the model clearly did not find. */
         private const val MIN_TEMPO = 40.0
@@ -334,7 +347,27 @@ class BeatTracker(
             val regular = gaps.count { abs(it - interval) <= interval * 0.1 }.toDouble() / gaps.size
             // Logits are unbounded; a median around 2 is a decisive peak, around 0 is not.
             val strength = 1 / (1 + exp(-(median(peakLogits) - 0.5)))
-            return max(0.0, min(0.95, 0.35 + 0.4 * regular + 0.25 * strength))
+            // Regularity is squared, and there is no free baseline: a grid with half its gaps
+            // broken is not half trusted, it is not a grid. The old 0.35 + 0.4 * regular let one
+            // in two broken gaps clear the 0.55 beat-match gate; now that needs about 0.7 regular
+            // with decisive peaks (see BeatTrackerConfidenceTest).
+            return max(0.0, min(0.95, 0.10 + 0.65 * regular * regular + 0.20 * strength))
         }
+
+        /**
+         * Beats from one detected downbeat to the next, as the median over the track, or 0 when
+         * there are too few downbeats to say. [beats] must be ascending.
+         */
+        fun beatsPerBar(beats: List<Double>, downbeats: List<Double>): Int {
+            if (downbeats.size < MIN_DOWNBEATS_FOR_METER) return 0
+            val counts = downbeats.zipWithNext { from, to ->
+                beats.count { it > from + 1e-6 && it <= to + 1e-6 }
+            }
+            return counts.sorted()[counts.size / 2]
+        }
+
+        /** [confidence], or at most [NON_FOUR_FOUR_CONFIDENCE_CAP] when the bars are not four beats. */
+        fun capForMeter(confidence: Double, beatsPerBar: Int): Double =
+            if (beatsPerBar == 0 || beatsPerBar == 4) confidence else min(confidence, NON_FOUR_FOUR_CONFIDENCE_CAP)
     }
 }
