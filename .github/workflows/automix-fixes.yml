@@ -1,0 +1,460 @@
+name: Automix - sửa độ tin cậy beat, cổng loop mix, key Camelot
+
+# Chạy tay: tab Actions -> chọn workflow này -> Run workflow.
+# Một file duy nhất: patch nằm ngay trong file này (diff dạng chữ thường, KHÔNG nén/base64)
+# nên đọc và duyệt được từng dòng. Workflow áp patch lên bản checkout, chạy test, build APK.
+# Mặc định KHÔNG commit gì vào repo. Bật "push_branch" nếu muốn đẩy sang nhánh để mở PR.
+#
+# Patch sửa (chỉ đụng thư mục shared/, 4 file nguồn + 3 file test):
+#   1. BeatTracker.gridConfidence: bỏ nền 0.35 miễn phí, bình phương độ đều.
+#      Trước: lưới hỏng một nửa số khoảng cách vẫn ~0.75 và qua cổng beat-match 0.55.
+#      Sau: cần khoảng 70% khoảng cách đều + peak rõ mới qua.
+#   2. BeatTracker: đếm số beat mỗi ô nhịp từ downbeat của model; nhịp khác 4/4 bị hạ
+#      confidence xuống dưới cổng DJ (0.2), vì planner, phrase và loop mix đều đếm ô nhịp = 4 beat.
+#   3. LoopMix.plan: thêm cổng confidence (MIN_BEATMATCH_CONFIDENCE) cho từng phía. Trước đây loop mix
+#      chỉ đọc tempo, nên bài confidence 0 vẫn bị cắt loop theo lưới đoán.
+#   4. TransitionPlanner.harmonicallyCompatible: dùng bánh xe Camelot thật (cùng số, relative
+#      major/minor, hoặc lệch 1 bước cùng mode). Trước đây cách nhau một cung (whole tone) vẫn coi là hợp.
+#   5. AnalysisStore.SCHEMA_VERSION 3 -> 4: cache cũ giữ confidence tính theo công thức cũ nên bị bỏ
+#      và phân tích lại (cơ chế có sẵn của app).
+#   6. Test mới: BeatTrackerConfidenceTest, KeyCompatibilityTest, 2 test trong LoopMixTest.
+#
+# KHÔNG sửa (cần dữ liệu thật, không phải code): ngưỡng giọng hát 0.25, độ chính xác key chroma.
+# Đừng chạy chung với các workflow automix-* khác nếu chúng cũng sửa TransitionPlanner.kt.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: "Chạy test của module shared trước khi build (khuyến nghị)"
+        type: boolean
+        default: true
+      build_apk:
+        description: "Build APK dev benchmark (R8 + baseline profile, ký bằng khoá debug)"
+        type: boolean
+        default: true
+      push_branch:
+        description: "Đẩy bản đã vá sang nhánh automix-fixes (để bạn mở PR). Tắt = không commit gì"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: automix-fixes-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fixes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      FIX_BRANCH: automix-fixes
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Write the patch
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/automix-fixes.patch" <<'PATCH_EOF'
+          diff --git a/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/LoopMix.kt b/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/LoopMix.kt
+          index 56f4fea..b97952c 100644
+          --- a/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/LoopMix.kt
+          +++ b/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/LoopMix.kt
+          @@ -174,6 +174,17 @@ object LoopMix {
+                   why: StringBuilder? = null,
+               ): Plan? {
+                   if (outVideo || inVideo) return null.also { why?.append("a music video") }
+          +        // The loop is cut on the grid, so the grid has to be one the policy would beat-match on.
+          +        // Without this a track with no confidence at all (a metadata BPM, a failed model) was
+          +        // looped on a guess, because only the tempo was ever read.
+          +        val outConfidence = (out.tailBeats?.confidence ?: out.beatConfidence).orZero()
+          +        if (outConfidence < MIN_BEATMATCH_CONFIDENCE) {
+          +            return null.also { why?.append("outgoing grid not trusted (${(outConfidence * 100).roundToInt()}%)") }
+          +        }
+          +        val inConfidence = (inn.headBeats?.confidence ?: inn.beatConfidence).orZero()
+          +        if (inConfidence < MIN_BEATMATCH_CONFIDENCE) {
+          +            return null.also { why?.append("incoming grid not trusted (${(inConfidence * 100).roundToInt()}%)") }
+          +        }
+                   val outGrid = constantGrid(out) ?: return null.also { why?.append("no grid on the outgoing song") }
+                   val inGrid = constantGrid(inn) ?: return null.also { why?.append("no grid on the incoming song") }
+                   val outCount = Rejections()
+          diff --git a/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/TransitionPlanner.kt b/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/TransitionPlanner.kt
+          index b2c67d7..438e6ea 100644
+          --- a/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/TransitionPlanner.kt
+          +++ b/shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/TransitionPlanner.kt
+          @@ -337,7 +337,7 @@ private fun normalizedTempoRatio(currentBpm: Double, nextBpm: Double): Double {
+               return ratio
+           }
+           
+          -private fun splitKey(key: String): Pair<Int?, String?> {
+          +internal fun splitKey(key: String): Pair<Int?, String?> {
+               val parts = key.trim().split(' ')
+               return KEY_INDEX[parts.firstOrNull()] to parts.getOrNull(1)
+           }
+          @@ -350,7 +350,38 @@ private fun keyDistance(left: String, right: String): Int? {
+               return pitchDistance + if (leftMode != null && rightMode != null && leftMode != rightMode) 1 else 0
+           }
+           
+          -private fun harmonicallyCompatible(left: String, right: String): Boolean {
+          +/**
+          + * A key's place on the Camelot wheel: its number (1..12) and whether it is a minor ("A") key,
+          + * or null for a key whose root or mode is not recognised.
+          + */
+          +internal fun camelotWheelPosition(key: String): Pair<Int, Boolean>? {
+          +    val (index, mode) = splitKey(key)
+          +    if (index == null) return null
+          +    val minor = when (mode?.lowercase()) {
+          +        "minor" -> true
+          +        "major" -> false
+          +        else -> return null
+          +    }
+          +    // A minor key sits on its relative major's number (A minor with C major, at 8).
+          +    val majorRoot = if (minor) (index + 3) % 12 else index
+          +    return ((majorRoot * 7) % 12 + 7) % 12 + 1 to minor
+          +}
+          +
+          +/**
+          + * Whether two keys mix without clashing: the same Camelot number (same key, or relative
+          + * major/minor) or one step round the wheel in the same mode. Pitch distance alone called a
+          + * whole tone apart compatible, which is a clash; two keys a fifth apart are one wheel step.
+          + * A key with no recognisable mode falls back to the pitch distance.
+          + */
+          +internal fun harmonicallyCompatible(left: String, right: String): Boolean {
+          +    val wheelLeft = camelotWheelPosition(left)
+          +    val wheelRight = camelotWheelPosition(right)
+          +    if (wheelLeft != null && wheelRight != null) {
+          +        if (wheelLeft.first == wheelRight.first) return true
+          +        if (wheelLeft.second != wheelRight.second) return false
+          +        val step = (wheelLeft.first - wheelRight.first + 12) % 12
+          +        return step == 1 || step == 11
+          +    }
+               val (leftIndex, leftMode) = splitKey(left)
+               val (rightIndex, rightMode) = splitKey(right)
+               if (leftIndex == null || rightIndex == null) return false
+          diff --git a/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/KeyCompatibilityTest.kt b/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/KeyCompatibilityTest.kt
+          new file mode 100644
+          index 0000000..7519319
+          --- /dev/null
+          +++ b/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/KeyCompatibilityTest.kt
+          @@ -0,0 +1,50 @@
+          +package com.music.bitchord.playback.smart
+          +
+          +import kotlin.test.Test
+          +import kotlin.test.assertEquals
+          +import kotlin.test.assertFalse
+          +import kotlin.test.assertNull
+          +import kotlin.test.assertTrue
+          +
+          +/** Key compatibility follows the Camelot wheel, with the analyzer's own key names. */
+          +class KeyCompatibilityTest {
+          +
+          +    @Test
+          +    fun keysLandOnTheirCamelotPosition() {
+          +        assertEquals(8 to false, camelotWheelPosition("C major"))
+          +        assertEquals(8 to true, camelotWheelPosition("A minor"))
+          +        assertEquals(9 to false, camelotWheelPosition("G major"))
+          +        assertEquals(7 to false, camelotWheelPosition("F major"))
+          +        assertEquals(2 to false, camelotWheelPosition("F\u266F major"))
+          +        assertEquals(2 to true, camelotWheelPosition("E\u266D minor"))
+          +        assertEquals(1 to false, camelotWheelPosition("B major"))
+          +        assertEquals(12 to false, camelotWheelPosition("E major"))
+          +    }
+          +
+          +    @Test
+          +    fun unrecognisedKeysHaveNoPosition() {
+          +        assertNull(camelotWheelPosition(""))
+          +        assertNull(camelotWheelPosition("C"))
+          +        assertNull(camelotWheelPosition("H major"))
+          +        assertNull(camelotWheelPosition("C dorian"))
+          +    }
+          +
+          +    @Test
+          +    fun theSameKeyTheRelativeAndOneWheelStepMix() {
+          +        assertTrue(harmonicallyCompatible("C major", "C major"))
+          +        assertTrue(harmonicallyCompatible("C major", "A minor"))
+          +        assertTrue(harmonicallyCompatible("C major", "G major"))
+          +        assertTrue(harmonicallyCompatible("C major", "F major"))
+          +        assertTrue(harmonicallyCompatible("A minor", "E minor"))
+          +        // Round the end of the wheel: 12B next to 1B.
+          +        assertTrue(harmonicallyCompatible("B major", "E major"))
+          +    }
+          +
+          +    @Test
+          +    fun aWholeToneOrATritoneApartClashes() {
+          +        assertFalse(harmonicallyCompatible("C major", "D major"))
+          +        assertFalse(harmonicallyCompatible("C major", "F\u266F major"))
+          +        assertFalse(harmonicallyCompatible("C major", "D minor"))
+          +        assertFalse(harmonicallyCompatible("A minor", "B minor"))
+          +    }
+          +}
+          diff --git a/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/LoopMixTest.kt b/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/LoopMixTest.kt
+          index b5c81af..5b0ad9c 100644
+          --- a/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/LoopMixTest.kt
+          +++ b/shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/LoopMixTest.kt
+          @@ -308,4 +308,22 @@ class LoopMixTest {
+               fun noMaskAndNoLyricsMeansNoLoop() {
+                   assertNull(plan(analysis(120.0, 200.0), analysis(120.0, 180.0), null, null))
+               }
+          +
+          +    @Test
+          +    fun aGridBelowTheBeatMatchGateGetsNoLoopMix() {
+          +        val shaky = MIN_BEATMATCH_CONFIDENCE - 0.01
+          +        val trusted = analysis(120.0, 180.0)
+          +        assertNull(plan(analysis(120.0, 200.0).copy(beatConfidence = shaky), trusted))
+          +        assertNull(plan(trusted.copy(duration = 200.0), analysis(120.0, 180.0).copy(beatConfidence = shaky)))
+          +        assertNotNull(plan(analysis(120.0, 200.0).copy(beatConfidence = MIN_BEATMATCH_CONFIDENCE), trusted))
+          +    }
+          +
+          +    @Test
+          +    fun theSidesOwnGridConfidenceDecidesNotTheWholeTracks() {
+          +        // Trusted over the whole track, but the model found a poor grid over the last minute.
+          +        val out = analysis(120.0, 200.0).copy(tailBeats = BeatSide(emptyList(), emptyList(), 120.0, 0.3))
+          +        val why = StringBuilder()
+          +        assertNull(LoopMix.plan(out, 200.0, analysis(120.0, 180.0), 180.0, 0.0, clear, clear, why = why))
+          +        assertTrue(why.contains("outgoing grid not trusted"), why.toString())
+          +    }
+           }
+          diff --git a/shared/src/jvmSharedMain/kotlin/com/music/bitchord/playback/smart/AnalysisStore.kt b/shared/src/jvmSharedMain/kotlin/com/music/bitchord/playback/smart/AnalysisStore.kt
+          index a4abfa6..b346de7 100644
+          --- a/shared/src/jvmSharedMain/kotlin/com/music/bitchord/playback/smart/AnalysisStore.kt
+          +++ b/shared/src/jvmSharedMain/kotlin/com/music/bitchord/playback/smart/AnalysisStore.kt
+          @@ -331,7 +331,7 @@ class AnalysisStore(
+                    * re-analysis costs seconds, and a beat grid interpreted under the wrong
+                    * assumptions is silently wrong for the life of the file.
+                    */
+          -        const val SCHEMA_VERSION = 3
+          +        const val SCHEMA_VERSION = 4
+           
+                   /** A few thousand tracks' worth, at tens of kilobytes each. */
+                   const val MAX_ENTRIES = 2_000
+          diff --git a/shared/src/jvmSharedMain/kotlin/com/music/bitchord/playback/smart/BeatTracker.kt b/shared/src/jvmSharedMain/kotlin/com/music/bitchord/playback/smart/BeatTracker.kt
+          index b9cb6f4..e38b80d 100644
+          --- a/shared/src/jvmSharedMain/kotlin/com/music/bitchord/playback/smart/BeatTracker.kt
+          +++ b/shared/src/jvmSharedMain/kotlin/com/music/bitchord/playback/smart/BeatTracker.kt
+          @@ -149,9 +149,12 @@ class BeatTracker(
+                       bpm = bpm,
+                       beatInterval = 60 / bpm,
+                       firstBeat = beats.first(),
+          -            beatConfidence = gridConfidence(
+          -                beats,
+          -                beatFrames.map { frame -> beatLogits.getOrElse(frame.roundToInt()) { 0f }.toDouble() },
+          +            beatConfidence = capForMeter(
+          +                gridConfidence(
+          +                    beats,
+          +                    beatFrames.map { frame -> beatLogits.getOrElse(frame.roundToInt()) { 0f }.toDouble() },
+          +                ),
+          +                beatsPerBar(beats, downbeats),
+                       ),
+                   )
+               }
+          @@ -242,6 +245,16 @@ class BeatTracker(
+                   private const val PEAK_WINDOW = 7
+                   private const val MIN_BEATS = 8
+           
+          +        /** Downbeats needed before the model's meter is believed (three bars). */
+          +        private const val MIN_DOWNBEATS_FOR_METER = 4
+          +
+          +        /**
+          +         * Confidence ceiling for a grid whose bars are not four beats long. Below
+          +         * [MIN_DJ_CONFIDENCE] on purpose: the planner, the phrase plans and the loop mix all count
+          +         * bars as four beats, so a 3/4 or 6/8 grid is not a grid they can cut on.
+          +         */
+          +        const val NON_FOUR_FOUR_CONFIDENCE_CAP = MIN_DJ_CONFIDENCE * 0.75
+          +
+                   /** Plausible musical tempo, used only to reject a grid the model clearly did not find. */
+                   private const val MIN_TEMPO = 40.0
+                   private const val MAX_TEMPO = 220.0
+          @@ -334,7 +347,27 @@ class BeatTracker(
+                       val regular = gaps.count { abs(it - interval) <= interval * 0.1 }.toDouble() / gaps.size
+                       // Logits are unbounded; a median around 2 is a decisive peak, around 0 is not.
+                       val strength = 1 / (1 + exp(-(median(peakLogits) - 0.5)))
+          -            return max(0.0, min(0.95, 0.35 + 0.4 * regular + 0.25 * strength))
+          +            // Regularity is squared, and there is no free baseline: a grid with half its gaps
+          +            // broken is not half trusted, it is not a grid. The old 0.35 + 0.4 * regular let one
+          +            // in two broken gaps clear the 0.55 beat-match gate; now that needs about 0.7 regular
+          +            // with decisive peaks (see BeatTrackerConfidenceTest).
+          +            return max(0.0, min(0.95, 0.10 + 0.65 * regular * regular + 0.20 * strength))
+          +        }
+          +
+          +        /**
+          +         * Beats from one detected downbeat to the next, as the median over the track, or 0 when
+          +         * there are too few downbeats to say. [beats] must be ascending.
+          +         */
+          +        fun beatsPerBar(beats: List<Double>, downbeats: List<Double>): Int {
+          +            if (downbeats.size < MIN_DOWNBEATS_FOR_METER) return 0
+          +            val counts = downbeats.zipWithNext { from, to ->
+          +                beats.count { it > from + 1e-6 && it <= to + 1e-6 }
+          +            }
+          +            return counts.sorted()[counts.size / 2]
+                   }
+          +
+          +        /** [confidence], or at most [NON_FOUR_FOUR_CONFIDENCE_CAP] when the bars are not four beats. */
+          +        fun capForMeter(confidence: Double, beatsPerBar: Int): Double =
+          +            if (beatsPerBar == 0 || beatsPerBar == 4) confidence else min(confidence, NON_FOUR_FOUR_CONFIDENCE_CAP)
+               }
+           }
+          diff --git a/shared/src/jvmTest/kotlin/com/music/bitchord/playback/smart/BeatTrackerConfidenceTest.kt b/shared/src/jvmTest/kotlin/com/music/bitchord/playback/smart/BeatTrackerConfidenceTest.kt
+          new file mode 100644
+          index 0000000..2f5e469
+          --- /dev/null
+          +++ b/shared/src/jvmTest/kotlin/com/music/bitchord/playback/smart/BeatTrackerConfidenceTest.kt
+          @@ -0,0 +1,58 @@
+          +package com.music.bitchord.playback.smart
+          +
+          +import kotlin.test.Test
+          +import kotlin.test.assertEquals
+          +import kotlin.test.assertTrue
+          +
+          +/**
+          + * The beat grid's confidence is the number the whole transition policy gates on, so what it lets
+          + * through is pinned here: a steady grid passes, one with half its gaps broken does not, and a
+          + * grid that is not in four does not reach the planner as a grid.
+          + */
+          +class BeatTrackerConfidenceTest {
+          +
+          +    private fun steady(count: Int, interval: Double = 0.5) = List(count) { it * interval }
+          +
+          +    private fun logits(count: Int, value: Double) = List(count) { value }
+          +
+          +    @Test
+          +    fun aSteadyDecisiveGridClearsTheBeatMatchGate() {
+          +        val beats = steady(64)
+          +        val confidence = BeatTracker.gridConfidence(beats, logits(beats.size, 2.0))
+          +        assertTrue(confidence >= MIN_BEATMATCH_CONFIDENCE, "was $confidence")
+          +        assertTrue(confidence <= 0.95, "was $confidence")
+          +    }
+          +
+          +    @Test
+          +    fun aGridWithHalfItsGapsBrokenDoesNotClearTheGate() {
+          +        var time = 0.0
+          +        val beats = listOf(0.0) + List(63) { index ->
+          +            time += if (index % 2 == 0) 0.5 else 0.9
+          +            time
+          +        }
+          +        val confidence = BeatTracker.gridConfidence(beats, logits(beats.size, 2.0))
+          +        assertTrue(confidence < MIN_BEATMATCH_CONFIDENCE, "was $confidence")
+          +    }
+          +
+          +    @Test
+          +    fun tooFewBeatsIsNoConfidenceAtAll() {
+          +        assertEquals(0.0, BeatTracker.gridConfidence(steady(7), logits(7, 2.0)))
+          +    }
+          +
+          +    @Test
+          +    fun barsAreCountedFromTheDetectedDownbeats() {
+          +        val beats = steady(40)
+          +        assertEquals(4, BeatTracker.beatsPerBar(beats, beats.filterIndexed { index, _ -> index % 4 == 0 }))
+          +        assertEquals(3, BeatTracker.beatsPerBar(beats, beats.filterIndexed { index, _ -> index % 3 == 0 }))
+          +        assertEquals(0, BeatTracker.beatsPerBar(beats, listOf(0.0, 2.0, 4.0)))
+          +    }
+          +
+          +    @Test
+          +    fun aGridNotInFourIsCappedBelowTheDjGate() {
+          +        assertEquals(0.9, BeatTracker.capForMeter(0.9, 4))
+          +        assertEquals(0.9, BeatTracker.capForMeter(0.9, 0))
+          +        val capped = BeatTracker.capForMeter(0.9, 3)
+          +        assertTrue(capped < MIN_DJ_CONFIDENCE, "was $capped")
+          +        assertEquals(0.1, BeatTracker.capForMeter(0.1, 6))
+          +    }
+          +}
+          PATCH_EOF
+
+      - name: Apply the patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          P="$RUNNER_TEMP/automix-fixes.patch"
+          if git apply --reverse --check "$P" 2>/dev/null; then
+            echo "::notice::Patch đã có sẵn trong nhánh này, bỏ qua bước áp."
+            echo "APPLIED=already" >> "$GITHUB_ENV"
+            exit 0
+          fi
+          if ! git apply --check "$P"; then
+            echo "::error::Patch không áp được lên nhánh này (file đã bị sửa khác bản gốc). Chạy trên bản main gốc, hoặc gỡ các thay đổi xung đột ở shared/."
+            exit 1
+          fi
+          git apply "$P"
+          echo "APPLIED=yes" >> "$GITHUB_ENV"
+          git apply --stat "$P"
+          {
+            echo "## Automix fixes"
+            echo
+            echo "Đã áp patch:"
+            echo
+            git diff --stat | sed 's/^/    /'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit the patch locally
+        if: ${{ env.APPLIED == 'yes' }}
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- shared
+          git commit -m "Automix: stricter beat confidence, loop-mix gate, Camelot key compatibility"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Write local.properties
+        run: |
+          echo "LASTFM_API_KEY=" > local.properties
+          echo "LASTFM_SECRET=" >> local.properties
+          echo "LISTEN_TOGETHER_SERVER=" >> local.properties
+
+      - run: chmod +x gradlew
+
+      - name: Shared tests
+        if: ${{ inputs.run_tests }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :shared:jvmTest 2>&1 | tee build.log
+
+      - name: Build the release-like dev APK
+        if: ${{ inputs.build_apk }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew assembleDevBenchmark 2>&1 | tee -a build.log
+
+      - name: Upload the arm64 APK
+        if: ${{ inputs.build_apk }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitchord-automix-fixes-arm64
+          path: app/build/outputs/apk/dev/benchmark/*arm64-v8a*.apk
+          if-no-files-found: error
+
+      - name: Upload the test reports
+        if: ${{ always() && inputs.run_tests }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-test-reports
+          path: shared/build/reports/tests/
+          if-no-files-found: ignore
+
+      - name: Upload the build log
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Push the patched code to a branch
+        if: ${{ inputs.push_branch && env.APPLIED == 'yes' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin "HEAD:refs/heads/${FIX_BRANCH}"
+          echo "Đã đẩy sang nhánh \`${FIX_BRANCH}\`. Mở PR từ nhánh đó vào ${GITHUB_REF_NAME}." >> "$GITHUB_STEP_SUMMARY"
