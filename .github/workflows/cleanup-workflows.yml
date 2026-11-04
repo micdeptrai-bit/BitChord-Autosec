@@ -1,0 +1,116 @@
+name: Don workflow cu (chay 1 lan roi tu xoa)
+
+# Cach dung (lam tren dien thoai duoc):
+#  1. Tao token: GitHub > Settings > Developer settings > Personal access tokens
+#     (Tokens classic) > tick "repo" va "workflow". Copy token.
+#  2. Repo > Settings > Secrets and variables > Actions > New repository secret
+#     Ten: WORKFLOW_PAT   Gia tri: token vua tao.
+#  3. Them file nay vao .github/workflows/cleanup-workflows.yml
+#  4. Actions > "Don workflow cu" > Run workflow:
+#       keep_file = ten FILE (khong phai ten hien thi) cua workflow v6 can giu
+#       dry_run   = true de xem truoc, false de xoa that.
+#
+# GITHUB_TOKEN mac dinh khong duoc phep sua thu muc .github/workflows,
+# nen buoc nay bat buoc phai dung token ca nhan o tren.
+
+on:
+  workflow_dispatch:
+    inputs:
+      keep_file:
+        description: "Ten file workflow v6 can giu (vd: automix-v6.yml)"
+        required: true
+        type: string
+      dry_run:
+        description: "Chi liet ke, chua xoa"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kiem tra token
+        env:
+          PAT: ${{ secrets.WORKFLOW_PAT }}
+        run: |
+          if [ -z "$PAT" ]; then
+            echo "::error::Chua co secret WORKFLOW_PAT (xem huong dan dau file)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.WORKFLOW_PAT }}
+
+      - name: Xoa workflow trung
+        env:
+          KEEP: ${{ inputs.keep_file }}
+          DRY: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          cd .github/workflows
+
+          if [ ! -f "$KEEP" ]; then
+            echo "::error::Khong thay file '$KEEP' trong .github/workflows. Kiem tra lai ten file."
+            exit 1
+          fi
+
+          files=(
+            "android (1).yml"
+            "auto mix-bpm-key.yml"
+            "automix-bpm-key.yml"
+            "automix-lockscreen.yml"
+            "automix-lockscreen-1.9.yml"
+            "automix-lockscreen-1.9 (1).yml"
+            "automix-lockscreen-1.9 (2).yml"
+            "automix-override.yml"
+            "automix-smooth.yml"
+            "automix-stage1-curves.yml"
+            "automix-v2-no-curve.yml"
+            "automix-v2-no-curve (2).yml"
+            "automix-v3-loop-reach (1).yml"
+            "automix-v4-deep-analysis.yml"
+            "automix-v5-mix-style.yml"
+            "mix-button-build.yml"
+            "mix-button-build (1).yml"
+            "mix-button-build (2).yml"
+            "mix-button-build (3).yml"
+            "lockscreen-glass.yml"
+            "lockscreen-glass.patch"
+          )
+
+          for f in "${files[@]}"; do
+            if [ "$f" = "$KEEP" ]; then
+              echo "::error::'$KEEP' nam trong danh sach xoa, dung lai."
+              exit 1
+            fi
+          done
+
+          removed=0
+          for f in "${files[@]}"; do
+            if [ -e "$f" ]; then
+              echo "Xoa: $f"
+              if [ "$DRY" != "true" ]; then git rm -q -- "$f"; fi
+              removed=$((removed + 1))
+            else
+              echo "Bo qua (khong co): $f"
+            fi
+          done
+          echo "Tong: $removed file."
+
+          if [ "$DRY" = "true" ]; then
+            echo "Dry run: chua xoa gi. Chay lai voi dry_run = false."
+            exit 0
+          fi
+
+          # Tu xoa chinh no de lan sau khong con thua mot workflow nua.
+          git rm -q -f -- cleanup-workflows.yml || true
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: don workflow trung, giu $KEEP [skip ci]"
+          git push
