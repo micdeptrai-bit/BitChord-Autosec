@@ -1402,4 +1402,6 @@
     <string name="visual_effect_bars_subtitle">Equaliser bars rising from the bars, taller where the music is louder</string>
     <string name="visual_effect_wave">Wave</string>
     <string name="visual_effect_wave_subtitle">The spectrum as one smooth wave rising from the bars</string>
+    <string name="ai_dj_mix">AI DJ Mix</string>
+    <string name="ai_dj_mix_subtitle">Mixes every pair the way a DJ would: reads tempo, key and phrasing, picks the blend length and handoff for each pair, and never falls back to a plain crossfade. A song that has not been analysed yet gets a clean cut.</string>
 </resources>

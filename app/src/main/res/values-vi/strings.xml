@@ -1455,4 +1455,6 @@
     <string name="visual_effect_bars_subtitle">Các cột equalizer mọc lên từ thanh, cao hơn ở chỗ nhạc to</string>
     <string name="visual_effect_wave">Sóng</string>
     <string name="visual_effect_wave_subtitle">Phổ âm thanh thành một làn sóng mượt mọc lên từ thanh</string>
+    <string name="ai_dj_mix">AI DJ Mix</string>
+    <string name="ai_dj_mix_subtitle">Mix từng cặp bài như DJ thật: đọc nhịp, tông và câu nhạc, tự chọn độ dài và cách chuyển cho từng cặp, không bao giờ rơi về crossfade thường. Bài chưa phân tích xong sẽ được cắt gọn thay vì mờ dần.</string>
 </resources>

@@ -307,6 +307,12 @@ object AppSettings {
     val mixIntensity = MutableStateFlow(com.music.bitchord.playback.smart.MixTuning.DEFAULT_INTENSITY)
 
     fun mixTuning() = com.music.bitchord.playback.smart.MixTuning(mixProfile.value, mixIntensity.value)
+
+    /**
+     * AI DJ Mix: Automix picks each pair's blend like a DJ would (tempo, key, phrasing) and never
+     * falls back to a plain crossfade. A mode of Automix, so it only acts while Automix is on.
+     */
+    val aiDjMix = MutableStateFlow(true)
     val skipSilence = MutableStateFlow(false)
 
     /** Requested PCM representation at the Android AudioTrack boundary. */
@@ -1015,6 +1021,7 @@ object AppSettings {
             )
         }.getOrDefault(AutomixMixStyle.ADAPTIVE)
         deepAnalysis.value = prefs.getBoolean(KEY_DEEP_ANALYSIS, false)
+        aiDjMix.value = prefs.getBoolean(KEY_AI_DJ_MIX, true)
         playerVisualEffect.value = runCatching {
             com.music.bitchord.ui.player.PlayerVisualEffect.valueOf(
                 prefs.getString(KEY_PLAYER_VISUAL_EFFECT, null)
@@ -1400,6 +1407,11 @@ object AppSettings {
     fun setAutomixGesture(value: AutomixGesture) {
         automixGesture.value = value
         prefs.edit().putString(KEY_AUTOMIX_GESTURE, value.name).apply()
+    }
+
+    fun setAiDjMix(value: Boolean) {
+        aiDjMix.value = value
+        prefs.edit().putBoolean(KEY_AI_DJ_MIX, value).apply()
     }
 
     fun setSkipSilence(value: Boolean) {
@@ -2345,6 +2357,7 @@ object AppSettings {
     private const val KEY_SMART_MIX_STYLE = "smart_mix_style"
     private const val KEY_AUTOMIX_PERFORMANCE_MODE = "automix_performance_mode"
     private const val KEY_AUTOMIX_MIX_STYLE = "automix_mix_style"
+    private const val KEY_AI_DJ_MIX = "ai_dj_mix"
     private const val KEY_AUTOMIX_GESTURE = "automix_gesture"
     private const val KEY_LOOP_MIX_REACH = "loop_mix_reach"
     private const val KEY_DEEP_ANALYSIS = "deep_analysis"

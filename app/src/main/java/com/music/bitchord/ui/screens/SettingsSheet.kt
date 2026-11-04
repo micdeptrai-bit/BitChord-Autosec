@@ -242,6 +242,7 @@ fun SettingsScreen(
     val automixGesture by AppSettings.automixGesture.collectAsStateWithLifecycle()
     val loopMixReach by AppSettings.loopMixReach.collectAsStateWithLifecycle()
     val deepAnalysis by AppSettings.deepAnalysis.collectAsStateWithLifecycle()
+    val aiDjMix by AppSettings.aiDjMix.collectAsStateWithLifecycle()
     val mixProfile by AppSettings.mixProfile.collectAsStateWithLifecycle()
     val playerVisualEffect by AppSettings.playerVisualEffect.collectAsStateWithLifecycle()
     val mixIntensity by AppSettings.mixIntensity.collectAsStateWithLifecycle()
@@ -837,6 +838,21 @@ fun SettingsScreen(
             // Only meaningful while Automix is on: both pick how its transitions are
             // planned, and nothing is planned with it off.
             if (smartFade) {
+                val aiDjTitle = stringResource(R.string.ai_dj_mix)
+                row(aiDjTitle, "ai", "dj", "mix", "crossfade", "transition", "automix") {
+                    SettingsRow(
+                        icon = Icons.Rounded.Waves,
+                        title = aiDjTitle,
+                        subtitle = stringResource(R.string.ai_dj_mix_subtitle),
+                        trailing = {
+                            IosSwitch(
+                                checked = aiDjMix,
+                                onCheckedChange = AppSettings::setAiDjMix,
+                            )
+                        },
+                        onClick = { AppSettings.setAiDjMix(!aiDjMix) },
+                    )
+                }
                 val automixStyleTitle = stringResource(R.string.automix_mix_style)
                 row(automixStyleTitle, "phrase", "bars", "length", "transition", "mix", "algorithm") {
                     SettingsRow(

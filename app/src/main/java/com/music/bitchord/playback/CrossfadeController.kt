@@ -36,6 +36,7 @@ import com.music.bitchord.playback.smart.displayBpm
 import com.music.bitchord.playback.smart.displayKey
 import com.music.bitchord.playback.smart.echoTailSeconds
 import com.music.bitchord.playback.smart.planTransitionWithOverride
+import com.music.bitchord.playback.smart.AiDjDirector
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -1095,8 +1096,21 @@ class CrossfadeController(
 
         // This pair's own choice if it has one, else the listener's global Mix
         // settings; with neither this is the planner's own plan, unchanged.
-        val pairOverride = TransitionOverrideStore.forPair(currentItem.mediaId, nextItem.mediaId)
+        val storedOverride = TransitionOverrideStore.forPair(currentItem.mediaId, nextItem.mediaId)
         val mixStyle = AppSettings.automixMixStyle.value
+        // AI DJ Mix decides this pair like a DJ would; with it off nothing here changes.
+        val aiDj = if (AppSettings.aiDjMix.value) {
+            AiDjDirector.direct(
+                analysis = currentAnalysis,
+                nextAnalysis = nextAnalysis,
+                stored = storedOverride,
+                listener = AppSettings.mixTuning(),
+                listenerGesture = AppSettings.automixGesture.value.variant,
+            )
+        } else {
+            null
+        }
+        val pairOverride = if (aiDj != null) aiDj.pairOverride else storedOverride
         val overridden = planTransitionWithOverride(
             pairOverride = pairOverride,
             analysis = currentAnalysis,
@@ -1109,8 +1123,8 @@ class CrossfadeController(
             mode = CrossfadeMode.SMART,
             advanced = advanced,
             mixWindow = mixStyle.mixWindow,
-            preferredFilterVariant = AppSettings.automixGesture.value.variant,
-            tuning = AppSettings.mixTuning(),
+            preferredFilterVariant = aiDj?.gesture ?: AppSettings.automixGesture.value.variant,
+            tuning = aiDj?.tuning ?: AppSettings.mixTuning(),
         )
         val plan = overridden.plan
         // One line per distinct verdict rather than one per 250ms tick, so the
@@ -1120,7 +1134,8 @@ class CrossfadeController(
             "|vocalOverlap=${"%.2f".format(Locale.ROOT, plan.vocalOverlap)}" +
             "|advanced=$advanced|style=$mixStyle|lock=${plan.phaseLock}|variant=${plan.filterVariant}|echo=${plan.echoSeconds}" +
             "|blocked=${plan.blocked}|policy=${plan.policyReasons.joinToString(",")}" +
-            "|override=${pairOverride != null}|overrideNotes=${overridden.notes.joinToString(",")}"
+            "|override=${pairOverride != null}|overrideNotes=${overridden.notes.joinToString(",")}" +
+            "|aiDj=${aiDj?.notes?.joinToString(",") ?: "off"}"
         if (verdict != lastPlanVerdict) {
             lastPlanVerdict = verdict
             Log.d(
