@@ -55,7 +55,7 @@ internal object SpectrumWatch {
  * recomposes nothing.
  */
 @Stable
-internal class BarEffect(val style: PlayerVisualEffect) {
+class BarEffect(val style: PlayerVisualEffect) {
     val levels = FloatArray(SPECTRUM_BANDS)
     var tick by mutableLongStateOf(0L)
     var seconds by mutableFloatStateOf(0f)
