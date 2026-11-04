@@ -274,8 +274,39 @@ object AppSettings {
      */
     val smartFadeEnabled = MutableStateFlow(false)
 
+    /** Mix length for every transition: 0 lets Automix decide, 8 or 16 fixes it in bars. */
+    val smartMixBars = MutableStateFlow(0)
+
+    /** 0 lets Automix pick per pair; 1 plain crossfade, 2 classic Automix, 3 quick cut, 4 long fade. */
+    val smartMixStyle = MutableStateFlow(0)
+
     /** The CPU budget used by Beat This! and vocal analysis for Automix. */
     val automixPerformanceMode = MutableStateFlow(AutomixPerformanceMode.BALANCED)
+
+    /**
+     * When a transition starts and how long it runs: the planner's own adaptive
+     * choice, a fixed 8- or 16-bar phrase mix, or the adaptive plan held inside a
+     * 30 s window. See [AutomixMixStyle].
+     */
+    val automixMixStyle = MutableStateFlow(AutomixMixStyle.ADAPTIVE)
+
+    /** The gesture forced on pairs too far apart in tempo to beatmatch; [AutomixGesture.AUTO] leaves it to the planner. */
+    val automixGesture = MutableStateFlow(AutomixGesture.AUTO)
+
+    /** How hard Automix looks for an instrumental loop to mix on; STRICT is the original behaviour. */
+    val loopMixReach = MutableStateFlow(com.music.bitchord.playback.smart.LoopMix.Reach.STRICT)
+
+    /** Analyse more of each song's opening and ending, so loop mix has more to search. Costs CPU and battery. */
+    val deepAnalysis = MutableStateFlow(false)
+
+    /** The effect drawn behind the Now Playing controls, moving with the music. */
+    val playerVisualEffect = MutableStateFlow(com.music.bitchord.ui.player.PlayerVisualEffect.OFF)
+
+    /** The taste Automix mixes with: a profile, and how punchy (0..100, 50 being the original behaviour). */
+    val mixProfile = MutableStateFlow(com.music.bitchord.playback.smart.MixProfile.BALANCED)
+    val mixIntensity = MutableStateFlow(com.music.bitchord.playback.smart.MixTuning.DEFAULT_INTENSITY)
+
+    fun mixTuning() = com.music.bitchord.playback.smart.MixTuning(mixProfile.value, mixIntensity.value)
     val skipSilence = MutableStateFlow(false)
 
     /** Requested PCM representation at the Android AudioTrack boundary. */
@@ -528,6 +559,54 @@ object AppSettings {
 
     /** Tries Spotify before Apple Music and the other animated-art providers. */
     val prioritizeSpotifyCanvas = MutableStateFlow(false)
+
+    /**
+     * Whether Spotify is asked for a canvas at all. Off removes it from the
+     * lookup chain entirely, so the other providers answer on their own and no
+     * request goes to Spotify. On by default: Spotify was always in the chain.
+     */
+    val spotifyCanvasEnabled = MutableStateFlow(true)
+
+    /**
+     * Shows a full-screen player (cover or Canvas, clock, transport) over the
+     * lock screen when the phone is woken while music plays. Off by default: it
+     * needs "Display over other apps" and costs a video decode per wake-up. See
+     * [LockScreenLauncher][com.music.bitchord.lockscreen.LockScreenLauncher].
+     */
+    val lockScreenPlayer = MutableStateFlow(false)
+
+    /**
+     * Which clock face the lock-screen player draws, by the name of its
+     * [LockClockStyle][com.music.bitchord.lockscreen.LockClockStyle]. Kept as the
+     * name rather than an ordinal so adding or reordering styles never moves
+     * someone's choice onto a different face; an unknown name falls back to the
+     * default style.
+     */
+    val lockScreenClockStyle = MutableStateFlow("CLASSIC")
+
+    /**
+     * Whether the lock-screen player draws its clock. Off leaves the art, the
+     * player and the swipe up; a long press on the art opens the sheet that
+     * switches it back on.
+     */
+    val lockScreenShowClock = MutableStateFlow(true)
+
+    /** Same for the transport card and the volume bar. */
+    val lockScreenShowPlayer = MutableStateFlow(true)
+
+    /**
+     * What the lock-screen cover or Canvas does when the track changes, by the
+     * name of its effect (NONE, FLIP, FLIP_V, SLIDE or ZOOM); unknown names fall
+     * back to FLIP.
+     */
+    val lockScreenTrackFx = MutableStateFlow("FLIP")
+
+    /**
+     * Whether a track with no Canvas clip shows its cover over the whole
+     * lock-screen player, instead of as a card on a blurred copy of itself.
+     * Covers made for a phone-shaped screen always fill it.
+     */
+    val lockScreenFullCover = MutableStateFlow(true)
 
     /**
      * Secondary artist art: a user-hosted artist-signature API used only when
@@ -883,6 +962,7 @@ object AppSettings {
         prefs = context.getSharedPreferences("bitchord_settings", Context.MODE_PRIVATE)
         this.authStore = authStore
         com.music.bitchord.data.spotify.LocalPlaylistStore.init(context)
+        com.music.bitchord.playback.TransitionOverrideStore.init(context)
         com.music.bitchord.data.OfflinePlaylists.init(
             context,
             likedTitle = context.getString(com.music.bitchord.R.string.auto_liked),
@@ -922,11 +1002,44 @@ object AppSettings {
         syncDownloadedPlaylists.value = prefs.getBoolean(KEY_SYNC_DOWNLOADED_PLAYLISTS, false)
         crossfadeSeconds.value = prefs.getInt(KEY_CROSSFADE, 0)
         smartFadeEnabled.value = prefs.getBoolean(KEY_SMART_FADE, false)
+        smartMixBars.value = prefs.getInt(KEY_SMART_MIX_BARS, 0).takeIf { it == 8 || it == 16 } ?: 0
+        smartMixStyle.value = prefs.getInt(KEY_SMART_MIX_STYLE, 0).takeIf { it in 0..4 } ?: 0
         automixPerformanceMode.value = runCatching {
             AutomixPerformanceMode.valueOf(
                 prefs.getString(KEY_AUTOMIX_PERFORMANCE_MODE, null) ?: AutomixPerformanceMode.BALANCED.name,
             )
         }.getOrDefault(AutomixPerformanceMode.BALANCED)
+        automixMixStyle.value = runCatching {
+            AutomixMixStyle.valueOf(
+                prefs.getString(KEY_AUTOMIX_MIX_STYLE, null) ?: AutomixMixStyle.ADAPTIVE.name,
+            )
+        }.getOrDefault(AutomixMixStyle.ADAPTIVE)
+        deepAnalysis.value = prefs.getBoolean(KEY_DEEP_ANALYSIS, false)
+        playerVisualEffect.value = runCatching {
+            com.music.bitchord.ui.player.PlayerVisualEffect.valueOf(
+                prefs.getString(KEY_PLAYER_VISUAL_EFFECT, null)
+                    ?: com.music.bitchord.ui.player.PlayerVisualEffect.OFF.name,
+            )
+        }.getOrDefault(com.music.bitchord.ui.player.PlayerVisualEffect.OFF)
+        mixProfile.value = runCatching {
+            com.music.bitchord.playback.smart.MixProfile.valueOf(
+                prefs.getString(KEY_MIX_PROFILE, null)
+                    ?: com.music.bitchord.playback.smart.MixProfile.BALANCED.name,
+            )
+        }.getOrDefault(com.music.bitchord.playback.smart.MixProfile.BALANCED)
+        mixIntensity.value = prefs.getInt(KEY_MIX_INTENSITY, com.music.bitchord.playback.smart.MixTuning.DEFAULT_INTENSITY)
+            .coerceIn(0, 100)
+        loopMixReach.value = runCatching {
+            com.music.bitchord.playback.smart.LoopMix.Reach.valueOf(
+                prefs.getString(KEY_LOOP_MIX_REACH, null)
+                    ?: com.music.bitchord.playback.smart.LoopMix.Reach.STRICT.name,
+            )
+        }.getOrDefault(com.music.bitchord.playback.smart.LoopMix.Reach.STRICT)
+        automixGesture.value = runCatching {
+            AutomixGesture.valueOf(
+                prefs.getString(KEY_AUTOMIX_GESTURE, null) ?: AutomixGesture.AUTO.name,
+            )
+        }.getOrDefault(AutomixGesture.AUTO)
         skipSilence.value = prefs.getBoolean(KEY_SKIP_SILENCE, false)
         outputPcmMode.value = runCatching {
             OutputPcmMode.valueOf(
@@ -996,6 +1109,13 @@ object AppSettings {
         canvasOverCellular.value = prefs.getBoolean(KEY_CANVAS_OVER_CELLULAR, false)
         spotifyCanvasAutoHide.value = prefs.getBoolean(KEY_SPOTIFY_CANVAS_AUTO_HIDE, true)
         prioritizeSpotifyCanvas.value = prefs.getBoolean(KEY_PRIORITIZE_SPOTIFY_CANVAS, false)
+        spotifyCanvasEnabled.value = prefs.getBoolean(KEY_SPOTIFY_CANVAS_ENABLED, true)
+        lockScreenPlayer.value = prefs.getBoolean(KEY_LOCK_SCREEN_PLAYER, false)
+        lockScreenClockStyle.value = prefs.getString(KEY_LOCK_SCREEN_CLOCK_STYLE, "CLASSIC") ?: "CLASSIC"
+        lockScreenShowClock.value = prefs.getBoolean(KEY_LOCK_SCREEN_SHOW_CLOCK, true)
+        lockScreenShowPlayer.value = prefs.getBoolean(KEY_LOCK_SCREEN_SHOW_PLAYER, true)
+        lockScreenTrackFx.value = prefs.getString(KEY_LOCK_SCREEN_TRACK_FX, "FLIP") ?: "FLIP"
+        lockScreenFullCover.value = prefs.getBoolean(KEY_LOCK_SCREEN_FULL_COVER, true)
         signatureApiEnabled.value = prefs.getBoolean(KEY_SIGNATURE_API_ENABLED, false)
         signatureApiUrl.value = normalizeSignatureApiUrl(prefs.getString(KEY_SIGNATURE_API_URL, "").orEmpty())
         fullBleedArtwork.value = prefs.getBoolean(KEY_FULL_BLEED_ARTWORK, true)
@@ -1229,9 +1349,57 @@ object AppSettings {
         prefs.edit().putBoolean(KEY_SMART_FADE, value).apply()
     }
 
+    fun setSmartMixBars(value: Int) {
+        val bars = if (value == 8 || value == 16) value else 0
+        smartMixBars.value = bars
+        prefs.edit().putInt(KEY_SMART_MIX_BARS, bars).apply()
+    }
+
+    fun setSmartMixStyle(value: Int) {
+        val style = value.takeIf { it in 0..4 } ?: 0
+        smartMixStyle.value = style
+        prefs.edit().putInt(KEY_SMART_MIX_STYLE, style).apply()
+    }
+
     fun setAutomixPerformanceMode(value: AutomixPerformanceMode) {
         automixPerformanceMode.value = value
         prefs.edit().putString(KEY_AUTOMIX_PERFORMANCE_MODE, value.name).apply()
+    }
+
+    fun setAutomixMixStyle(value: AutomixMixStyle) {
+        automixMixStyle.value = value
+        prefs.edit().putString(KEY_AUTOMIX_MIX_STYLE, value.name).apply()
+    }
+
+    fun setMixProfile(value: com.music.bitchord.playback.smart.MixProfile) {
+        mixProfile.value = value
+        prefs.edit().putString(KEY_MIX_PROFILE, value.name).apply()
+    }
+
+    fun setMixIntensity(value: Int) {
+        val clamped = value.coerceIn(0, 100)
+        mixIntensity.value = clamped
+        prefs.edit().putInt(KEY_MIX_INTENSITY, clamped).apply()
+    }
+
+    fun setPlayerVisualEffect(value: com.music.bitchord.ui.player.PlayerVisualEffect) {
+        playerVisualEffect.value = value
+        prefs.edit().putString(KEY_PLAYER_VISUAL_EFFECT, value.name).apply()
+    }
+
+    fun setDeepAnalysis(value: Boolean) {
+        deepAnalysis.value = value
+        prefs.edit().putBoolean(KEY_DEEP_ANALYSIS, value).apply()
+    }
+
+    fun setLoopMixReach(value: com.music.bitchord.playback.smart.LoopMix.Reach) {
+        loopMixReach.value = value
+        prefs.edit().putString(KEY_LOOP_MIX_REACH, value.name).apply()
+    }
+
+    fun setAutomixGesture(value: AutomixGesture) {
+        automixGesture.value = value
+        prefs.edit().putString(KEY_AUTOMIX_GESTURE, value.name).apply()
     }
 
     fun setSkipSilence(value: Boolean) {
@@ -1573,6 +1741,41 @@ object AppSettings {
     fun setPrioritizeSpotifyCanvas(value: Boolean) {
         prioritizeSpotifyCanvas.value = value
         prefs.edit().putBoolean(KEY_PRIORITIZE_SPOTIFY_CANVAS, value).apply()
+    }
+
+    fun setSpotifyCanvasEnabled(value: Boolean) {
+        spotifyCanvasEnabled.value = value
+        prefs.edit().putBoolean(KEY_SPOTIFY_CANVAS_ENABLED, value).apply()
+    }
+
+    fun setLockScreenPlayer(value: Boolean) {
+        lockScreenPlayer.value = value
+        prefs.edit().putBoolean(KEY_LOCK_SCREEN_PLAYER, value).apply()
+    }
+
+    fun setLockScreenClockStyle(value: String) {
+        lockScreenClockStyle.value = value
+        prefs.edit().putString(KEY_LOCK_SCREEN_CLOCK_STYLE, value).apply()
+    }
+
+    fun setLockScreenShowClock(value: Boolean) {
+        lockScreenShowClock.value = value
+        prefs.edit().putBoolean(KEY_LOCK_SCREEN_SHOW_CLOCK, value).apply()
+    }
+
+    fun setLockScreenShowPlayer(value: Boolean) {
+        lockScreenShowPlayer.value = value
+        prefs.edit().putBoolean(KEY_LOCK_SCREEN_SHOW_PLAYER, value).apply()
+    }
+
+    fun setLockScreenTrackFx(value: String) {
+        lockScreenTrackFx.value = value
+        prefs.edit().putString(KEY_LOCK_SCREEN_TRACK_FX, value).apply()
+    }
+
+    fun setLockScreenFullCover(value: Boolean) {
+        lockScreenFullCover.value = value
+        prefs.edit().putBoolean(KEY_LOCK_SCREEN_FULL_COVER, value).apply()
     }
 
     fun setSignatureApiEnabled(value: Boolean) {
@@ -2138,7 +2341,16 @@ object AppSettings {
     private const val KEY_SYNC_DOWNLOADED_PLAYLISTS = "sync_downloaded_playlists"
     private const val KEY_CROSSFADE = "crossfade_seconds"
     private const val KEY_SMART_FADE = "smart_fade_enabled"
+    private const val KEY_SMART_MIX_BARS = "smart_mix_bars"
+    private const val KEY_SMART_MIX_STYLE = "smart_mix_style"
     private const val KEY_AUTOMIX_PERFORMANCE_MODE = "automix_performance_mode"
+    private const val KEY_AUTOMIX_MIX_STYLE = "automix_mix_style"
+    private const val KEY_AUTOMIX_GESTURE = "automix_gesture"
+    private const val KEY_LOOP_MIX_REACH = "loop_mix_reach"
+    private const val KEY_DEEP_ANALYSIS = "deep_analysis"
+    private const val KEY_PLAYER_VISUAL_EFFECT = "player_visual_effect"
+    private const val KEY_MIX_PROFILE = "mix_profile"
+    private const val KEY_MIX_INTENSITY = "mix_intensity"
     private const val KEY_SKIP_SILENCE = "skip_silence"
     private const val KEY_OUTPUT_PCM_MODE = "output_pcm_mode"
     private const val KEY_PREFER_USB_DAC = "prefer_usb_dac"
@@ -2188,6 +2400,13 @@ object AppSettings {
     private const val KEY_CANVAS_OVER_CELLULAR = "canvas_over_cellular"
     private const val KEY_SPOTIFY_CANVAS_AUTO_HIDE = "spotify_canvas_auto_hide"
     private const val KEY_PRIORITIZE_SPOTIFY_CANVAS = "prioritize_spotify_canvas"
+    private const val KEY_SPOTIFY_CANVAS_ENABLED = "spotify_canvas_enabled"
+    private const val KEY_LOCK_SCREEN_PLAYER = "lock_screen_player"
+    private const val KEY_LOCK_SCREEN_CLOCK_STYLE = "lock_screen_clock_style"
+    private const val KEY_LOCK_SCREEN_SHOW_CLOCK = "lock_screen_show_clock"
+    private const val KEY_LOCK_SCREEN_SHOW_PLAYER = "lock_screen_show_player"
+    private const val KEY_LOCK_SCREEN_TRACK_FX = "lock_screen_track_fx"
+    private const val KEY_LOCK_SCREEN_FULL_COVER = "lock_screen_full_cover"
     private const val KEY_SIGNATURE_API_ENABLED = "signature_api_enabled"
     private const val KEY_SIGNATURE_API_URL = "signature_api_url"
     private const val KEY_FULL_BLEED_ARTWORK = "full_bleed_artwork"

@@ -366,6 +366,40 @@
     <string name="legacy_mesh_gradient_subtitle">Brings back the drifting colour blobs behind the player from v1.5</string>
     <string name="animated_cover_art">Animated cover art</string>
     <string name="artist_signatures">Artist signatures</string>
+    <string name="lock_screen_player">Lock screen player</string>
+    <string name="lock_screen_player_subtitle">Wake the phone while music plays to get a full-screen player with the cover or animated Canvas. Needs “Display over other apps”; swipe up to unlock.</string>
+    <string name="lock_clock_classic">Classic</string>
+    <string name="lock_clock_thin">Thin</string>
+    <string name="lock_clock_stacked">Stacked</string>
+    <string name="lock_clock_serif">Serif</string>
+    <string name="lock_clock_digital">Digital</string>
+    <string name="lock_clock_condensed">Tall</string>
+    <string name="lock_clock_outline">Outline</string>
+    <string name="lock_clock_gradient">Gradient</string>
+    <string name="lock_clock_dual">Two-tone</string>
+    <string name="lock_clock_editorial">Editorial</string>
+    <string name="lock_clock_script">Script</string>
+    <string name="lock_clock_ring">Ring</string>
+    <string name="lock_clock_analog">Analog</string>
+    <string name="lock_clock_compact">Compact</string>
+    <string name="lock_clock_glass">Glass</string>
+    <string name="lock_clock_ghost">Ghost</string>
+    <string name="lock_clock_wire">Wireframe</string>
+    <string name="lock_clock_frosted">Frosted</string>
+    <string name="lock_clock_neon">Neon</string>
+    <string name="lock_clock_cards">Flip cards</string>
+    <string name="lock_clock_minimal">Minimal</string>
+    <string name="lock_show_clock">Show the clock</string>
+    <string name="lock_show_player">Show the player</string>
+    <string name="lock_full_cover">Full-screen cover</string>
+    <string name="lock_fx_title">When the track changes</string>
+    <string name="lock_fx_none">Off</string>
+    <string name="lock_fx_flip">Flip</string>
+    <string name="lock_fx_flip_v">Flip up</string>
+    <string name="lock_fx_slide">Slide</string>
+    <string name="lock_fx_zoom">Zoom</string>
+    <string name="lock_clock_picker_title">Clock style</string>
+    <string name="lock_clock_picker_hint">Tap the clock for the next style. Tap empty space to hide or show everything; hold it to reopen this sheet.</string>
     <string name="artist_signatures_subtitle">Shows a handwritten signature when Apple Music has no title logo</string>
     <string name="artist_signatures_url">Signature API URL</string>
     <string name="artist_signatures_url_hint">https://signatures.example.com</string>
@@ -1300,4 +1334,72 @@
     <string name="no_audio_version">No audio version found for this video</string>
     <string name="no_video_version">No video version found for this song</string>
     <string name="version_switch_in_party">Everyone in Listen Together hears the same version</string>
+
+    <!-- Automix mix style / gesture, Spotify Canvas switch -->
+    <string name="automix_mix_style">Mix timing [BETA]</string>
+    <string name="automix_mix_style_subtitle">Chooses when a transition is allowed to start</string>
+    <string name="automix_mix_style_hint">How long it lasts is set from the Mix button.</string>
+    <string name="automix_style_adaptive">Adaptive</string>
+    <string name="automix_style_adaptive_subtitle">Starts wherever the two songs agree best · recommended</string>
+    <string name="automix_style_windowed">Last 30 seconds</string>
+    <string name="automix_style_windowed_subtitle">Never starts earlier than 30 s before the end of the song</string>
+    <string name="automix_gesture">Mismatched-tempo gesture</string>
+    <string name="automix_gesture_subtitle">How songs too far apart in tempo are joined</string>
+    <string name="automix_gesture_hint">Used only for pairs that cannot be beatmatched.</string>
+    <string name="automix_gesture_auto">Automatic</string>
+    <string name="automix_gesture_auto_subtitle">Varies from pair to pair</string>
+    <string name="automix_gesture_sweep">Filter sweep</string>
+    <string name="automix_gesture_sweep_subtitle">Strong high-pass and low-pass sweep across the join</string>
+    <string name="automix_gesture_bass_handoff">Bass handoff</string>
+    <string name="automix_gesture_bass_handoff_subtitle">Lighter colour change with a clear low-end swap</string>
+    <string name="automix_gesture_echo_ride">Echo out</string>
+    <string name="automix_gesture_echo_ride_subtitle">The outgoing song trails away in a beat-synced echo</string>
+    <string name="spotify_canvas_enabled">Use Spotify Canvas</string>
+    <string name="spotify_canvas_enabled_subtitle">Turn off to skip Spotify when looking for animated covers. Other providers still work.</string>
+
+    <!-- Loop mix reach -->
+    <string name="loop_reach">Loop mix reach</string>
+    <string name="loop_reach_subtitle">How hard Automix looks for an instrumental loop to mix on</string>
+    <string name="loop_reach_hint">A loop mix only happens when both songs have a bar-aligned loop without singing. Wider and looser settings find one for more pairs.</string>
+    <string name="loop_reach_strict">Strict</string>
+    <string name="loop_reach_strict_subtitle">Only clean instrumental loops · the original behaviour</string>
+    <string name="loop_reach_wide">Wide</string>
+    <string name="loop_reach_wide_subtitle">Searches further into each song for a clean loop</string>
+    <string name="loop_reach_loose">Loose</string>
+    <string name="loop_reach_loose_subtitle">Also accepts a little singing in the loop, so more pairs get a loop mix</string>
+
+    <!-- Deep analysis -->
+    <string name="deep_analysis">Deep analysis</string>
+    <string name="deep_analysis_subtitle">Analyse more of each song\'s opening and ending so loop mix has more to choose from. Uses more CPU and battery; applies from the next app restart.</string>
+
+    <!-- Mix profile -->
+    <string name="mix_profile">Mix style</string>
+    <string name="mix_profile_subtitle">The taste Automix mixes with</string>
+    <string name="mix_profile_hint">A profile changes how long Automix lets a mix run and which handoff an unmatched pair gets. It never forces a mix the songs cannot carry.</string>
+    <string name="mix_profile_balanced">Balanced</string>
+    <string name="mix_profile_balanced_subtitle">Automix as it always was</string>
+    <string name="mix_profile_chill">Chill</string>
+    <string name="mix_profile_chill_subtitle">Longer, softer overlaps with a filter sweep</string>
+    <string name="mix_profile_club">Club</string>
+    <string name="mix_profile_club_subtitle">Slightly longer blends and a low-end handoff where both songs have a kick</string>
+    <string name="mix_profile_radio">Radio</string>
+    <string name="mix_profile_radio_subtitle">Short, quick overlaps</string>
+    <string name="mix_intensity">Mix intensity</string>
+    <string name="mix_intensity_subtitle">Gentle makes overlaps longer and sweeps softer; punchy makes them shorter</string>
+    <string name="mix_intensity_gentle">Gentle</string>
+    <string name="mix_intensity_normal">Normal</string>
+    <string name="mix_intensity_punchy">Punchy</string>
+
+    <!-- Player visual effect -->
+    <string name="visual_effect">Seek and volume bar effect</string>
+    <string name="visual_effect_subtitle">Makes the progress and volume bars move with the music</string>
+    <string name="visual_effect_hint">Drawn on the progress bar and the volume bar of the Now Playing screen and fed by what is playing. It stops while Reduce animation is on, and uses a little extra battery.</string>
+    <string name="visual_effect_off">Off</string>
+    <string name="visual_effect_off_subtitle">No effect</string>
+    <string name="visual_effect_glow">Glow</string>
+    <string name="visual_effect_glow_subtitle">A soft halo round the played part that swells with the bass</string>
+    <string name="visual_effect_bars">Bars</string>
+    <string name="visual_effect_bars_subtitle">Equaliser bars rising from the bars, taller where the music is louder</string>
+    <string name="visual_effect_wave">Wave</string>
+    <string name="visual_effect_wave_subtitle">The spectrum as one smooth wave rising from the bars</string>
 </resources>

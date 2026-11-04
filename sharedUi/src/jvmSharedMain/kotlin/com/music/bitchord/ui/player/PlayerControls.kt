@@ -77,6 +77,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -220,6 +221,7 @@ internal fun PlayerScrubber(
     val reduceAnimation by PlayerSettings.reduceAnimation.collectAsStateWithLifecycle()
     // One clock for the bar and the "Mixing" label, so they breathe on the same beat.
     val mixPulse = rememberMixPulse({ mixBlend.value }, enabled = !reduceAnimation)
+    val barEffect = rememberBarEffect()
     Column(Modifier.fillMaxWidth()) {
         ThinSlider(
             value = shown,
@@ -229,6 +231,7 @@ internal fun PlayerScrubber(
             mixing = mixing,
             mixPulse = mixPulse,
             transitionWindow = transitionWindow,
+            effect = barEffect,
         )
         Box(
             modifier = Modifier
@@ -366,12 +369,13 @@ internal fun PlaybackQualityLabel(
 
 /**
  * Stats for nerds, on the foot of the sleeve: the measured stream, and under
- * it what Automix's analysis is doing. Nothing at all while the setting is off.
+ * it what Automix's analysis is doing. Those lines are nothing at all while the
+ * setting is off. The song's BPM and key are the exception: they show whenever
+ * Automix has measured them, with or without stats for nerds.
  */
 @Composable
 internal fun SleeveNerdStats(song: Song, modifier: Modifier = Modifier) {
     val showNerdStats by PlayerSettings.showNerdStats.collectAsStateWithLifecycle()
-    if (!showNerdStats) return
     val nerdStats by NerdStats.current.collectAsStateWithLifecycle()
     val smartFadeOn by PlayerSettings.smartFadeEnabled.collectAsStateWithLifecycle()
     val smartAnalysis by PlayerSettings.smartAnalysis.collectAsStateWithLifecycle()
@@ -387,6 +391,23 @@ internal fun SleeveNerdStats(song: Song, modifier: Modifier = Modifier) {
     val inParty by remember {
         PlayerPlatform.host.party.map { it.inParty }.distinctUntilChanged()
     }.collectAsStateWithLifecycle(initialValue = PlayerPlatform.host.party.value.inParty)
+    // The tempo and key are Automix's own measurements, shown whenever Automix
+    // has them: they describe the song rather than the stream, so they do not
+    // wait on stats for nerds. Nothing until the track has been analysed, and
+    // nothing where nothing is analysed (a party, a video row).
+    val tempoKeyText = if (smartFadeOn && !inParty && !song.isVideoOrigin && smartAnalysis.currentBpm > 0) {
+        buildString {
+            append(smartAnalysis.currentBpm)
+            append(" BPM")
+            if (smartAnalysis.currentKey.isNotBlank()) {
+                append(" · ")
+                append(smartAnalysis.currentKey)
+            }
+        }
+    } else {
+        null
+    }
+    if (!showNerdStats && tempoKeyText == null) return
     // A plain white line reads fine over the usual dark tile, but a light
     // stretch of an animated cover — sky, snow, a pale sleeve — washes it out
     // entirely. The shadow costs nothing on a dark background and is what
@@ -402,11 +423,25 @@ internal fun SleeveNerdStats(song: Song, modifier: Modifier = Modifier) {
         horizontalAlignment = Alignment.CenterHorizontally,
         modifier = modifier,
     ) {
-        nerdStats?.describe()?.let { stats ->
+        if (showNerdStats) {
+            nerdStats?.describe()?.let { stats ->
+                Text(
+                    text = stats,
+                    style = nerdStyle,
+                    color = Color.White.copy(alpha = 0.65f),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center,
+                )
+            }
+        }
+        tempoKeyText?.let { tempoKey ->
             Text(
-                text = stats,
+                text = tempoKey,
                 style = nerdStyle,
-                color = Color.White.copy(alpha = 0.65f),
+                // Brighter than the stream line: this one is for the listener,
+                // not a debugging aid, so it should read first.
+                color = Color.White.copy(alpha = 0.85f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center,
@@ -415,7 +450,7 @@ internal fun SleeveNerdStats(song: Song, modifier: Modifier = Modifier) {
         // Only when Automix is actually switched on: otherwise this would
         // report on analysis nothing is going to use, which is noise rather
         // than a stat.
-        if (smartFadeOn) {
+        if (showNerdStats && smartFadeOn) {
             Text(
                 // Both sides always named, even when they agree, so the line
                 // reads the same way every time and the eye can find the half
@@ -542,6 +577,7 @@ internal fun VolumeRow(
     onValueChange: (Float) -> Unit,
     onValueChangeFinished: () -> Unit,
 ) {
+    val volumeEffect = rememberBarEffect()
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -560,6 +596,7 @@ internal fun VolumeRow(
             idleHeight = 6.dp,
             activeHeight = 10.dp,
             modifier = Modifier.weight(1f),
+            effect = volumeEffect,
         )
         Spacer(Modifier.width(10.dp))
         Icon(
@@ -597,6 +634,8 @@ internal fun PlayerActionRow(
 ) {
     val showPartyButton by PlayerSettings.showListenTogetherButton.collectAsStateWithLifecycle()
     val inParty = rememberPartyBadge().inParty
+    var showMixSheet by remember { mutableStateOf(false) }
+    val mixOn by PlayerSettings.smartFadeEnabled.collectAsStateWithLifecycle()
     // Just the output glyph in the middle.
     val compact = !queueOpen && !showPartyButton && !inParty
     BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -605,7 +644,7 @@ internal fun PlayerActionRow(
         // hold still as they swap. A lone output glyph is spaced as though the
         // two-up capsule held it — closer in, without crowding — and they part
         // again as the queue opens to make room.
-        val edgeInset = ((maxWidth - BOTTOM_ACTION_SIZE * 2 - pillWidth(3)) / 4).coerceAtLeast(0.dp)
+        val edgeInset = ((maxWidth - BOTTOM_ACTION_SIZE * 2 - pillWidth(4)) / 4).coerceAtLeast(0.dp)
         val compactInset = ((maxWidth - BOTTOM_ACTION_SIZE * 2 - pillWidth(2)) / 4).coerceAtLeast(0.dp)
         val closeIn = compactInset - edgeInset
         // Held as State and read only in the glyphs' placement, so the slide
@@ -692,6 +731,14 @@ internal fun PlayerActionRow(
                             haptic = if (autoplayEnabled) Haptic.ToggleOff else Haptic.ToggleOn,
                             tapWindowMs = AUTOPLAY_TAP_WINDOW_MS,
                         )
+                        PillDivider()
+                        PillSegment(
+                            label = stringResource(Res.string.mix_label),
+                            contentDescription = stringResource(Res.string.mix_settings),
+                            onClick = { showMixSheet = true },
+                            highlighted = mixOn,
+                            haptic = Haptic.Expand,
+                        )
                     }
                 } else {
                     OutputPartyPill(
@@ -714,6 +761,9 @@ internal fun PlayerActionRow(
                     haptic = if (queueOpen) Haptic.Tap else Haptic.Expand,
                 )
             }
+        }
+        if (showMixSheet) {
+            MixSheet(onDismiss = { showMixSheet = false })
         }
     }
 }

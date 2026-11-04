@@ -12,6 +12,14 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!--
+      Lock-screen player: lets the app start its full-screen player from the
+      background when the phone is woken while music plays. A special-access
+      permission the listener grants in system settings; the Lock screen player
+      switch sends them there. Without it that feature does nothing.
+    -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
     <!-- Touch feedback. The system's own haptics switch is honoured on top of
          this, so granting it doesn't override a user who turned buzzing off. -->
     <uses-permission android:name="android.permission.VIBRATE" />
@@ -596,6 +604,22 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity-alias>
+
+        <!--
+          The full-screen player that shows over the lock screen. Its own task
+          (empty affinity, single instance) and out of Recents, so it never drags
+          the main window up behind it; showWhenLocked / turnScreenOn are set in
+          code because the manifest attributes need API 27.
+        -->
+        <activity
+            android:name=".lockscreen.LockScreenActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:launchMode="singleInstance"
+            android:taskAffinity=""
+            android:screenOrientation="portrait"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:theme="@style/Theme.BitChord" />
 
         <service
             android:name=".playback.PlaybackService"

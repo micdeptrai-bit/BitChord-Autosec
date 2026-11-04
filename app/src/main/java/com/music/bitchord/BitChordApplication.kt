@@ -197,6 +197,9 @@ class BitChordApplication : Application(), SingletonImageLoader.Factory, Configu
         initLastfm()
         // The public "apps open right now" count; see Presence.
         com.music.bitchord.data.presence.AndroidPresence.install(this)
+        // Wakes the lock-screen player; inert unless its setting is on and
+        // the overlay permission is granted. After AppSettings.init above.
+        com.music.bitchord.lockscreen.LockScreenLauncher.install(this)
         backgroundInit.join()
     }
 

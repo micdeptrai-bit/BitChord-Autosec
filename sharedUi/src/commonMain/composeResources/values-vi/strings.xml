@@ -198,4 +198,26 @@
     <string name="search_library_empty">Tìm các bài hát trong thư mục Nhạc cục bộ của bạn.</string>
     <string name="search_library_hint">Bài hát, nghệ sĩ và album</string>
     <string name="search_library_no_results">Không có gì trong Nhạc cục bộ khớp với “%1$s”.</string>
+    <string name="mix_label">Mix</string>
+    <string name="mix_title">Mix</string>
+    <string name="mix_settings">Cài đặt Mix</string>
+    <string name="mix_hint">Chuyển bài kiểu DJ giữa các bài hát. Áp dụng cho mọi bài.</string>
+    <string name="mix_length">Độ dài chuyển bài</string>
+    <string name="mix_length_auto">Tự động</string>
+    <string name="mix_length_8">8 ô nhịp</string>
+    <string name="mix_length_16">16 ô nhịp</string>
+    <string name="mix_style">Kiểu chuyển bài</string>
+    <string name="mix_style_auto">Tự động</string>
+    <string name="mix_style_crossfade">Crossfade thường</string>
+    <string name="mix_off_note">Bật Mix để chỉnh các mục này.</string>
+    <string name="spotify_canvas_turn_off">Tắt Spotify Canvas</string>
+    <string name="spotify_canvas_turn_on">Bật Spotify Canvas</string>
+    <string name="mix_style_classic">Cổ điển</string>
+    <string name="mix_style_quick_cut">Cắt nhanh</string>
+    <string name="mix_style_long_fade">Mờ dài</string>
+    <string name="mix_style_auto_desc">Mix kiểu DJ: Automix khớp nhịp, căn theo cụm nhạc và chọn lúc hợp nhất cho từng cặp bài.</string>
+    <string name="mix_style_crossfade_desc">Mờ dần 6 giây giữa hai bài, không khớp nhịp. Mục độ dài ở trên không áp dụng.</string>
+    <string name="mix_style_classic_desc">Automix nguyên bản: đơn giản hơn, khớp tempo bằng cách tăng hoặc giảm tốc bài kế tiếp.</string>
+    <string name="mix_style_quick_cut_desc">Cắt 1 giây khi bài này hết và bài sau vào, như đài phát thanh. Mục độ dài ở trên không áp dụng.</string>
+    <string name="mix_style_long_fade_desc">Mờ dần 12 giây để hai bài tan vào nhau. Mục độ dài ở trên không áp dụng.</string>
 </resources>

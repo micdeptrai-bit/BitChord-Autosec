@@ -99,6 +99,8 @@ fun ThinSlider(
     inactiveColor: Color = Color.White.copy(alpha = 0.26f),
     /** Halfway between the two track colours: visible against unplayed, invisible under played. */
     markerColor: Color = Color.White.copy(alpha = 0.5f),
+    /** The listener's player effect, moving with the music; null draws the bar as it always was. */
+    effect: BarEffect? = null,
 ) {
     var dragging by remember { mutableStateOf(false) }
     val height by animateDpAsState(
@@ -181,6 +183,17 @@ fun ThinSlider(
             },
         contentAlignment = Alignment.Center,
     ) {
+        if (effect != null) {
+            // Under the track, in the strip of touch target around it, so the bar itself is untouched.
+            BarEffectCanvas(
+                effect = effect,
+                progress = value,
+                trackHeight = height,
+                stripHeight = activeHeight + 22.dp,
+                playedColor = activeColor,
+                unplayedColor = inactiveColor,
+            )
+        }
         Canvas(
             Modifier
                 .fillMaxWidth()

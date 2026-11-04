@@ -39,6 +39,7 @@ fun SpotifyCanvasAuthScreen(
     onNavigateUp: () -> Unit
 ) {
     val currentToken by AppSettings.spotifySpdcToken.collectAsStateWithLifecycle()
+    val spotifyEnabled by AppSettings.spotifyCanvasEnabled.collectAsStateWithLifecycle()
     val autoHidePlayer by AppSettings.spotifyCanvasAutoHide.collectAsStateWithLifecycle()
     val prioritizeSpotify by AppSettings.prioritizeSpotifyCanvas.collectAsStateWithLifecycle()
     var tokenInput by remember(currentToken) { mutableStateOf(currentToken) }
@@ -71,6 +72,13 @@ fun SpotifyCanvasAuthScreen(
                 text = stringResource(R.string.spotify_canvas_setup_description),
                 style = MaterialTheme.typography.bodyLarge,
                 modifier = Modifier.padding(bottom = 16.dp)
+            )
+
+            SpotifyCanvasSettingToggle(
+                title = stringResource(R.string.spotify_canvas_enabled),
+                subtitle = stringResource(R.string.spotify_canvas_enabled_subtitle),
+                checked = spotifyEnabled,
+                onCheckedChange = AppSettings::setSpotifyCanvasEnabled,
             )
 
             SpotifyCanvasSettingToggle(

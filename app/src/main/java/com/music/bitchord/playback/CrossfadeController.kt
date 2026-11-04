@@ -32,8 +32,10 @@ import com.music.bitchord.playback.smart.TrackAnalysis
 import com.music.bitchord.playback.smart.TransitionPlan
 import com.music.bitchord.playback.smart.TransitionStyle
 import com.music.bitchord.playback.smart.TransitionTrackInfo
+import com.music.bitchord.playback.smart.displayBpm
+import com.music.bitchord.playback.smart.displayKey
 import com.music.bitchord.playback.smart.echoTailSeconds
-import com.music.bitchord.playback.smart.planTransition
+import com.music.bitchord.playback.smart.planTransitionWithOverride
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -1091,7 +1093,12 @@ class CrossfadeController(
         // The DJ planner is Automix now; there is no separate mode switch.
         val advanced = true
 
-        val plan = planTransition(
+        // This pair's own choice if it has one, else the listener's global Mix
+        // settings; with neither this is the planner's own plan, unchanged.
+        val pairOverride = TransitionOverrideStore.forPair(currentItem.mediaId, nextItem.mediaId)
+        val mixStyle = AppSettings.automixMixStyle.value
+        val overridden = planTransitionWithOverride(
+            pairOverride = pairOverride,
             analysis = currentAnalysis,
             nextAnalysis = nextAnalysis,
             currentTrack = currentItem.toTransitionInfo(duration),
@@ -1101,14 +1108,19 @@ class CrossfadeController(
             fadeSeconds = fallbackSeconds,
             mode = CrossfadeMode.SMART,
             advanced = advanced,
+            mixWindow = mixStyle.mixWindow,
+            preferredFilterVariant = AppSettings.automixGesture.value.variant,
+            tuning = AppSettings.mixTuning(),
         )
+        val plan = overridden.plan
         // One line per distinct verdict rather than one per 250ms tick, so the
         // log says what the planner decided for this pair without burying it.
         val verdict = "${plan.reason}|${plan.transitionStyle}|fade=${plan.fadeMs}" +
             "|cue=${plan.incomingCueTime}|rate=${plan.incomingPlaybackRate}" +
             "|vocalOverlap=${"%.2f".format(Locale.ROOT, plan.vocalOverlap)}" +
-            "|advanced=$advanced|lock=${plan.phaseLock}|variant=${plan.filterVariant}|echo=${plan.echoSeconds}" +
-            "|blocked=${plan.blocked}|policy=${plan.policyReasons.joinToString(",")}"
+            "|advanced=$advanced|style=$mixStyle|lock=${plan.phaseLock}|variant=${plan.filterVariant}|echo=${plan.echoSeconds}" +
+            "|blocked=${plan.blocked}|policy=${plan.policyReasons.joinToString(",")}" +
+            "|override=${pairOverride != null}|overrideNotes=${overridden.notes.joinToString(",")}"
         if (verdict != lastPlanVerdict) {
             lastPlanVerdict = verdict
             Log.d(
@@ -1294,9 +1306,15 @@ class CrossfadeController(
         val currentItem = player.currentMediaItem
         val nextIndex = player.nextMediaItemIndex
         val nextItem = if (nextIndex == C.INDEX_UNSET) null else player.getMediaItemAt(nextIndex)
+        val currentAnalysis = currentItem?.let { analysisFor(it) }
+        val nextAnalysis = nextItem?.let { analysisFor(it) }
         AppSettings.smartAnalysis.value = SmartAnalysis(
             current = currentItem?.let { stateOf(it, analysisFor(it)) } ?: TrackAnalysisState.WAITING,
             next = nextItem?.let { stateOf(it, analysisFor(it)) } ?: TrackAnalysisState.WAITING,
+            currentBpm = currentAnalysis?.displayBpm() ?: 0,
+            currentKey = currentAnalysis?.displayKey().orEmpty(),
+            nextBpm = nextAnalysis?.displayBpm() ?: 0,
+            nextKey = nextAnalysis?.displayKey().orEmpty(),
         )
     }
 
@@ -2286,7 +2304,8 @@ class CrossfadeController(
             noteLoopVerdict(pair, null, "waiting on lyrics")
             return null
         }
-        val key = "$pair|${System.identityHashCode(currentAnalysis)}|${System.identityHashCode(nextAnalysis)}"
+        val reach = AppSettings.loopMixReach.value
+        val key = "$pair|${System.identityHashCode(currentAnalysis)}|${System.identityHashCode(nextAnalysis)}|${reach.name}"
         val cached = loopPlanned
         // Kept while its loop is still far enough ahead to set up; a seek past
         // that plans again from the new playhead.
@@ -2303,6 +2322,7 @@ class CrossfadeController(
             sungOut = outLyrics.spans,
             sungIn = inLyrics.spans,
             why = why,
+            reach = reach,
         )
         loopPlanKey = key
         loopPlanned = plan

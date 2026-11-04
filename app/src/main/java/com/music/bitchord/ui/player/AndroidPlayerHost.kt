@@ -78,24 +78,38 @@ class AndroidPlayerHost(context: Context) : PlayerHost {
         override val preferUsbDac get() = AppSettings.preferUsbDac
         override val prioritizeSpotifyCanvas get() = AppSettings.prioritizeSpotifyCanvas
         override val reduceAnimation get() = AppSettings.reduceAnimation
+        override val visualEffect get() = AppSettings.playerVisualEffect
+        override fun setVisualEffect(value: PlayerVisualEffect) = AppSettings.setPlayerVisualEffect(value)
+        override fun readSpectrum(into: FloatArray): Boolean =
+            com.music.bitchord.playback.audio.SpectrumTap.read(into)
+        override fun setSpectrumWatched(watched: Boolean) {
+            com.music.bitchord.playback.audio.SpectrumTap.watched = watched
+        }
         override val reduceDynamicBlur get() = AppSettings.reduceDynamicBlur
         override val showNerdStats get() = AppSettings.showNerdStats
         override val showListenTogetherButton get() = AppSettings.showListenTogetherButton
         override val smartAnalysis get() = AppSettings.smartAnalysis
         override val automixDetail get() = AppSettings.automixDetail
         override val smartFadeEnabled get() = AppSettings.smartFadeEnabled
+        override val smartMixBars get() = AppSettings.smartMixBars
+        override val smartMixStyle get() = AppSettings.smartMixStyle
         override val smartMixInProgress get() = AppSettings.smartMixInProgress
         override val smartMixBlend get() = AppSettings.smartMixBlend
         override val smartMixView get() = AppSettings.smartMixView
         override val smartMixProgress get() = AppSettings.smartMixProgress
         override val smartTransitionWindow get() = AppSettings.smartTransitionWindow
         override val spotifyCanvasAutoHide get() = AppSettings.spotifyCanvasAutoHide
+        override val spotifyCanvasEnabled get() = AppSettings.spotifyCanvasEnabled
         override val syncedLyrics get() = AppSettings.syncedLyrics
         override val translationLanguage get() = AppSettings.translationLanguage
         override val versionAlignmentInProgress get() = AppSettings.versionAlignmentInProgress
 
         override fun setLastPlayerScreen(value: LastPlayerScreen) = AppSettings.setLastPlayerScreen(value)
         override fun setLyricsOffsetMs(value: Int) = AppSettings.setLyricsOffsetMs(value)
+        override fun setSmartFadeEnabled(value: Boolean) = AppSettings.setSmartFadeEnabled(value)
+        override fun setSmartMixBars(value: Int) = AppSettings.setSmartMixBars(value)
+        override fun setSmartMixStyle(value: Int) = AppSettings.setSmartMixStyle(value)
+        override fun setSpotifyCanvasEnabled(value: Boolean) = AppSettings.setSpotifyCanvasEnabled(value)
     }
 
     override fun cachedCanvas(song: Song): CanvasArtwork? = CanvasRepository.cached(song)

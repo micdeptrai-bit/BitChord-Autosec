@@ -243,6 +243,16 @@ interface PlayerSettingsSource {
     val lastPlayerScreen: StateFlow<LastPlayerScreen>
     val legacyMeshGradient: StateFlow<Boolean>
     val lyricsBlur: StateFlow<Boolean>
+    /** The effect drawn on the seek and volume bars, moving with the music; OFF by default. */
+    val visualEffect: StateFlow<PlayerVisualEffect>
+    fun setVisualEffect(value: PlayerVisualEffect)
+    /**
+     * Copies the latest [SPECTRUM_BANDS] bands (0..1, low to high) of what is playing into [into],
+     * and answers whether any were heard lately. Always false where the host has no such tap.
+     */
+    fun readSpectrum(into: FloatArray): Boolean
+    /** Tells the audio side whether the spectrum is on screen; it computes nothing while it is not. */
+    fun setSpectrumWatched(watched: Boolean)
     val lyricsOffsetMs: StateFlow<Int>
     val lyricsSourceOrder: StateFlow<List<LyricsSource>>
     val meteredConnection: StateFlow<Boolean?>
@@ -263,6 +273,10 @@ interface PlayerSettingsSource {
      */
     val automixDetail: StateFlow<String?>
     val smartFadeEnabled: StateFlow<Boolean>
+    /** Mix length for every transition: 0 lets Automix decide, 8 or 16 fixes it in bars. */
+    val smartMixBars: StateFlow<Int>
+    /** 0 lets Automix pick per pair; 1 plain crossfade, 2 classic Automix, 3 quick cut, 4 long fade. */
+    val smartMixStyle: StateFlow<Int>
     /** True only while an analysed Automix transition is audibly mixing two tracks. */
     val smartMixInProgress: StateFlow<Boolean>
     /** The Automix blend in flight, for the scrubber's beat glow; null between blends. */
@@ -273,12 +287,18 @@ interface PlayerSettingsSource {
     val smartMixProgress: StateFlow<Float>
     val smartTransitionWindow: StateFlow<TransitionWindow?>
     val spotifyCanvasAutoHide: StateFlow<Boolean>
+    /** Whether Spotify is asked for a Canvas at all; off leaves the other providers to answer. */
+    val spotifyCanvasEnabled: StateFlow<Boolean>
     val syncedLyrics: StateFlow<Boolean>
     val translationLanguage: StateFlow<String>
     val versionAlignmentInProgress: StateFlow<Boolean>
 
     fun setLastPlayerScreen(value: LastPlayerScreen)
     fun setLyricsOffsetMs(value: Int)
+    fun setSmartFadeEnabled(value: Boolean)
+    fun setSmartMixBars(value: Int)
+    fun setSmartMixStyle(value: Int)
+    fun setSpotifyCanvasEnabled(value: Boolean)
 }
 
 /** The player's name for the installed host's settings, read where AppSettings used to be. */

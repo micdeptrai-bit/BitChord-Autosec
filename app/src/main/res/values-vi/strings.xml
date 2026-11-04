@@ -1223,6 +1223,40 @@
     <string name="spotify_use_spdc_token">Dùng token sp_dc</string>
     <string name="spotify_track_unavailable">Không tìm thấy bài hát đó trên YouTube Music</string>
     <string name="artist_signatures">Chữ ký nghệ sĩ</string>
+    <string name="lock_screen_player">Trình phát màn hình khóa</string>
+    <string name="lock_screen_player_subtitle">Bật màn hình khi đang phát nhạc sẽ hiện trình phát toàn màn hình với ảnh bìa hoặc Canvas động. Cần quyền “Hiển thị trên các ứng dụng khác”; vuốt lên để mở khóa.</string>
+    <string name="lock_clock_classic">Cổ điển</string>
+    <string name="lock_clock_thin">Mảnh</string>
+    <string name="lock_clock_stacked">Xếp chồng</string>
+    <string name="lock_clock_serif">Thanh lịch</string>
+    <string name="lock_clock_digital">Điện tử</string>
+    <string name="lock_clock_condensed">Cao gầy</string>
+    <string name="lock_clock_outline">Viền</string>
+    <string name="lock_clock_gradient">Chuyển sắc</string>
+    <string name="lock_clock_dual">Hai tông</string>
+    <string name="lock_clock_editorial">Tạp chí</string>
+    <string name="lock_clock_script">Viết tay</string>
+    <string name="lock_clock_ring">Vòng giây</string>
+    <string name="lock_clock_analog">Kim</string>
+    <string name="lock_clock_compact">Gọn</string>
+    <string name="lock_clock_glass">Kính</string>
+    <string name="lock_clock_ghost">Mờ ảo</string>
+    <string name="lock_clock_wire">Khung dây</string>
+    <string name="lock_clock_frosted">Kính mờ</string>
+    <string name="lock_clock_neon">Neon</string>
+    <string name="lock_clock_cards">Thẻ lật</string>
+    <string name="lock_clock_minimal">Tối giản</string>
+    <string name="lock_show_clock">Hiện đồng hồ</string>
+    <string name="lock_show_player">Hiện trình phát</string>
+    <string name="lock_full_cover">Bìa toàn màn hình</string>
+    <string name="lock_fx_title">Khi chuyển bài</string>
+    <string name="lock_fx_none">Tắt</string>
+    <string name="lock_fx_flip">Lật ngang</string>
+    <string name="lock_fx_flip_v">Lật dọc</string>
+    <string name="lock_fx_slide">Trượt</string>
+    <string name="lock_fx_zoom">Phóng</string>
+    <string name="lock_clock_picker_title">Kiểu đồng hồ</string>
+    <string name="lock_clock_picker_hint">Chạm đồng hồ để đổi kiểu. Chạm vùng trống để ẩn/hiện giao diện; giữ để mở lại bảng này.</string>
     <string name="artist_signatures_subtitle">Hiển thị chữ ký tay khi Apple Music không có logo tiêu đề</string>
     <string name="artist_signatures_url">URL API chữ ký</string>
     <string name="artist_signatures_url_hint">https://signatures.example.com</string>
@@ -1353,4 +1387,72 @@
     <string name="bit_perfect_status_inexact">%1$s · không chính xác: nguồn này không phải PCM lossless</string>
     <string name="bit_perfect_status_waiting">Đang chờ bản nhạc lossless trên đầu ra được hỗ trợ</string>
     <string name="bit_perfect_status_unavailable">Không khả dụng cho bản nhạc này (%1$s)</string>
+
+    <!-- Automix mix style / gesture, Spotify Canvas switch -->
+    <string name="automix_mix_style">Thời điểm mix [BETA]</string>
+    <string name="automix_mix_style_subtitle">Chọn lúc cho phép bắt đầu chuyển bài</string>
+    <string name="automix_mix_style_hint">Độ dài chuyển bài chỉnh ở nút Mix.</string>
+    <string name="automix_style_adaptive">Thích ứng</string>
+    <string name="automix_style_adaptive_subtitle">Bắt đầu ở chỗ hai bài hợp nhau nhất · khuyên dùng</string>
+    <string name="automix_style_windowed">30 giây cuối</string>
+    <string name="automix_style_windowed_subtitle">Không bắt đầu sớm hơn 30 giây trước khi hết bài</string>
+    <string name="automix_gesture">Kiểu nối khi lệch nhịp</string>
+    <string name="automix_gesture_subtitle">Cách nối hai bài có tempo quá xa nhau</string>
+    <string name="automix_gesture_hint">Chỉ dùng cho cặp bài không thể khớp nhịp.</string>
+    <string name="automix_gesture_auto">Tự động</string>
+    <string name="automix_gesture_auto_subtitle">Thay đổi theo từng cặp bài</string>
+    <string name="automix_gesture_sweep">Quét bộ lọc</string>
+    <string name="automix_gesture_sweep_subtitle">Quét lọc cao và lọc thấp mạnh qua đoạn nối</string>
+    <string name="automix_gesture_bass_handoff">Trao bass</string>
+    <string name="automix_gesture_bass_handoff_subtitle">Đổi màu nhẹ hơn, đổi dải trầm rõ ràng</string>
+    <string name="automix_gesture_echo_ride">Echo mờ dần</string>
+    <string name="automix_gesture_echo_ride_subtitle">Bài cũ tan dần trong tiếng vọng theo nhịp</string>
+    <string name="spotify_canvas_enabled">Dùng Spotify Canvas</string>
+    <string name="spotify_canvas_enabled_subtitle">Tắt để bỏ qua Spotify khi tìm ảnh bìa động. Các nguồn khác vẫn hoạt động.</string>
+
+    <!-- Loop mix reach -->
+    <string name="loop_reach">Độ rộng của loop mix</string>
+    <string name="loop_reach_subtitle">Mức độ tìm đoạn không lời để loop khi mix</string>
+    <string name="loop_reach_hint">Loop mix chỉ chạy khi cả hai bài có đoạn loop khớp ô nhịp và không có giọng hát. Chọn Rộng hoặc Thoáng thì nhiều cặp bài được loop mix hơn.</string>
+    <string name="loop_reach_strict">Chặt</string>
+    <string name="loop_reach_strict_subtitle">Chỉ dùng đoạn không lời sạch · như ban đầu</string>
+    <string name="loop_reach_wide">Rộng</string>
+    <string name="loop_reach_wide_subtitle">Tìm xa hơn trong mỗi bài để có đoạn loop sạch</string>
+    <string name="loop_reach_loose">Thoáng</string>
+    <string name="loop_reach_loose_subtitle">Cho phép chút giọng hát trong loop, nhiều cặp bài được loop mix hơn</string>
+
+    <!-- Deep analysis -->
+    <string name="deep_analysis">Phân tích sâu</string>
+    <string name="deep_analysis_subtitle">Phân tích nhiều hơn phần đầu và phần cuối mỗi bài để loop mix có nhiều chỗ chọn hơn. Tốn CPU và pin hơn; áp dụng từ lần mở lại app sau.</string>
+
+    <!-- Mix profile -->
+    <string name="mix_profile">Phong cách mix</string>
+    <string name="mix_profile_subtitle">Gu mix của Automix</string>
+    <string name="mix_profile_hint">Phong cách đổi độ dài mỗi lần mix và kiểu chuyển cho cặp bài lệch nhịp. Nó không bao giờ ép mix những cặp bài không mix nổi.</string>
+    <string name="mix_profile_balanced">Cân bằng</string>
+    <string name="mix_profile_balanced_subtitle">Automix như ban đầu</string>
+    <string name="mix_profile_chill">Chill</string>
+    <string name="mix_profile_chill_subtitle">Chồng bài dài và mềm hơn, dùng filter sweep</string>
+    <string name="mix_profile_club">Club</string>
+    <string name="mix_profile_club_subtitle">Chồng bài dài hơn chút, chuyển bass khi cả hai bài đều có kick</string>
+    <string name="mix_profile_radio">Radio</string>
+    <string name="mix_profile_radio_subtitle">Chồng bài ngắn và nhanh</string>
+    <string name="mix_intensity">Độ mạnh tay</string>
+    <string name="mix_intensity_subtitle">Nhẹ thì chồng bài dài và sweep êm hơn; mạnh thì chồng bài ngắn hơn</string>
+    <string name="mix_intensity_gentle">Nhẹ</string>
+    <string name="mix_intensity_normal">Vừa</string>
+    <string name="mix_intensity_punchy">Mạnh</string>
+
+    <!-- Player visual effect -->
+    <string name="visual_effect">Hiệu ứng thanh tua và âm lượng</string>
+    <string name="visual_effect_subtitle">Thanh tiến trình và thanh âm lượng chuyển động theo nhạc</string>
+    <string name="visual_effect_hint">Vẽ ngay trên thanh tiến trình và thanh âm lượng của màn hình đang phát, lấy dữ liệu từ bài đang chạy. Tự dừng khi bật Giảm hiệu ứng chuyển động, và tốn thêm một chút pin.</string>
+    <string name="visual_effect_off">Tắt</string>
+    <string name="visual_effect_off_subtitle">Không có hiệu ứng</string>
+    <string name="visual_effect_glow">Ánh sáng</string>
+    <string name="visual_effect_glow_subtitle">Quầng sáng mềm quanh phần đã phát, phồng lên theo tiếng bass</string>
+    <string name="visual_effect_bars">Cột</string>
+    <string name="visual_effect_bars_subtitle">Các cột equalizer mọc lên từ thanh, cao hơn ở chỗ nhạc to</string>
+    <string name="visual_effect_wave">Sóng</string>
+    <string name="visual_effect_wave_subtitle">Phổ âm thanh thành một làn sóng mượt mọc lên từ thanh</string>
 </resources>

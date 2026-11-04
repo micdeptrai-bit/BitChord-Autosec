@@ -38,6 +38,7 @@ class DspChain(
     val loudness: LoudnessProcessor = LoudnessProcessor(),
 ) : FloatAudioProcessor {
 
+    private val spectrum = SpectrumAnalyzer()
     private var currentSampleRate: Int = 0
     private var processCounter: Long = 0L
 
@@ -47,6 +48,7 @@ class DspChain(
         equalizer.configure(sampleRate, channelCount)
         transition.configure(sampleRate, channelCount)
         loudness.configure(sampleRate, channelCount)
+        spectrum.configure(sampleRate)
     }
 
     /** A new track has begun gaplessly on this sink; see [LoudnessProcessor.onStreamBoundary]. */
@@ -84,6 +86,8 @@ class DspChain(
         // see; the loudness stage's limiter is what catches whatever survives.
         loudness.holdLimiter = equalizer.isShaping
         loudness.process(block)
+        // Last, and read-only: the visualizer sees what is about to be heard.
+        spectrum.process(block)
     }
 
     @Suppress("DEPRECATION")

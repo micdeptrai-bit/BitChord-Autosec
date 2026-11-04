@@ -5,6 +5,7 @@ import kotlin.math.ceil
 import kotlin.math.roundToInt
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -75,6 +76,35 @@ class LoopMixTest {
         assertTrue(plan.out.loopEnd <= 199.5)
         assertTrue(plan.out.loopStart > 200 - 60)
         assertEquals(0.5, plan.inn.loopStart, 1e-9)
+    }
+
+    @Test
+    fun theWiderReachesOnlyEverSearchFurtherAndForgiveMore() {
+        val strict = LoopMix.Reach.STRICT
+        assertEquals(LoopMix.OUT_SEARCH_SEC, strict.outSearchSec)
+        assertEquals(LoopMix.IN_SEARCH_SEC, strict.inSearchSec)
+        assertEquals(LoopMix.MAX_SUNG_SHARE, strict.maxSungShare)
+        assertEquals(LoopMix.MAX_SUNG_RUN_SEC, strict.maxSungRunSec)
+        assertTrue(strict.trustLyrics)
+        for (wider in listOf(LoopMix.Reach.WIDE, LoopMix.Reach.LOOSE)) {
+            assertTrue(wider.outSearchSec >= strict.outSearchSec)
+            assertTrue(wider.maxSungShare >= strict.maxSungShare)
+            assertTrue(wider.maxSungRunSec >= strict.maxSungRunSec)
+        }
+        assertFalse(LoopMix.Reach.LOOSE.trustLyrics)
+    }
+
+    @Test
+    fun theStrictReachPlansExactlyAsTheDefaultDoes() {
+        val out = analysis(124.0, 200.0)
+        val inn = analysis(124.0, 180.0)
+        val byDefault = assertNotNull(plan(out, inn))
+        val strict = assertNotNull(
+            LoopMix.plan(out, out.duration, inn, inn.duration, 0.0, clear, clear, reach = LoopMix.Reach.STRICT),
+        )
+        assertEquals(byDefault.out.loopStart, strict.out.loopStart)
+        assertEquals(byDefault.inn.loopStart, strict.inn.loopStart)
+        assertEquals(byDefault.totalBars, strict.totalBars)
     }
 
     @Test

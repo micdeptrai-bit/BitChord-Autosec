@@ -64,6 +64,7 @@ import androidx.compose.material.icons.rounded.Translate
 import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.LocalOffer
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.MusicOff
 import androidx.compose.material.icons.rounded.MotionPhotosOff
 import androidx.compose.material.icons.rounded.Extension
@@ -89,6 +90,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -162,6 +164,11 @@ import com.music.bitchord.data.settings.OutputPcmMode
 import com.music.bitchord.data.settings.BitPerfectMode
 import com.music.bitchord.playback.AudioOutputStatus
 import com.music.bitchord.playback.audio.bitperfect.BitPerfectOutput
+import com.music.bitchord.data.settings.AutomixGesture
+import com.music.bitchord.playback.smart.LoopMix
+import com.music.bitchord.playback.smart.MixProfile
+import com.music.bitchord.ui.player.PlayerVisualEffect
+import com.music.bitchord.data.settings.AutomixMixStyle
 import com.music.bitchord.data.settings.AutomixPerformanceMode
 import com.music.bitchord.R
 import com.music.bitchord.data.sources.DeviceCodecs
@@ -231,6 +238,13 @@ fun SettingsScreen(
     val crossfade by AppSettings.crossfadeSeconds.collectAsStateWithLifecycle()
     val smartFade by AppSettings.smartFadeEnabled.collectAsStateWithLifecycle()
     val automixPerformance by AppSettings.automixPerformanceMode.collectAsStateWithLifecycle()
+    val automixMixStyle by AppSettings.automixMixStyle.collectAsStateWithLifecycle()
+    val automixGesture by AppSettings.automixGesture.collectAsStateWithLifecycle()
+    val loopMixReach by AppSettings.loopMixReach.collectAsStateWithLifecycle()
+    val deepAnalysis by AppSettings.deepAnalysis.collectAsStateWithLifecycle()
+    val mixProfile by AppSettings.mixProfile.collectAsStateWithLifecycle()
+    val playerVisualEffect by AppSettings.playerVisualEffect.collectAsStateWithLifecycle()
+    val mixIntensity by AppSettings.mixIntensity.collectAsStateWithLifecycle()
     val skipSilence by AppSettings.skipSilence.collectAsStateWithLifecycle()
     val dolbyAtmos by AppSettings.dolbyAtmos.collectAsStateWithLifecycle()
     val directSourceStream by AppSettings.directSourceStream.collectAsStateWithLifecycle()
@@ -249,6 +263,8 @@ fun SettingsScreen(
     val lyricsBlur by AppSettings.lyricsBlur.collectAsStateWithLifecycle()
     val animatedCanvas by AppSettings.animatedCanvas.collectAsStateWithLifecycle()
     val canvasOverCellular by AppSettings.canvasOverCellular.collectAsStateWithLifecycle()
+    val spotifyCanvasEnabled by AppSettings.spotifyCanvasEnabled.collectAsStateWithLifecycle()
+    val lockScreenPlayer by AppSettings.lockScreenPlayer.collectAsStateWithLifecycle()
     val signatureApiEnabled by AppSettings.signatureApiEnabled.collectAsStateWithLifecycle()
     val signatureApiUrl by AppSettings.signatureApiUrl.collectAsStateWithLifecycle()
     val fullBleedArtwork by AppSettings.fullBleedArtwork.collectAsStateWithLifecycle()
@@ -287,6 +303,11 @@ fun SettingsScreen(
     val dontRepeatSuggestions by AppSettings.dontRepeatSuggestions.collectAsStateWithLifecycle()
     val smartVersionAlignment by AppSettings.smartVersionAlignment.collectAsStateWithLifecycle()
     val filterNonMusicAudio by AppSettings.filterNonMusicAudio.collectAsStateWithLifecycle()
+    var pickingAutomixStyle by remember { mutableStateOf(false) }
+    var pickingAutomixGesture by remember { mutableStateOf(false) }
+    var pickingLoopReach by remember { mutableStateOf(false) }
+    var pickingMixProfile by remember { mutableStateOf(false) }
+    var pickingVisualEffect by remember { mutableStateOf(false) }
     val localMusicFolderUri by AppSettings.localMusicFolderUri.collectAsStateWithLifecycle()
     val highPerformanceMode by AppSettings.highPerformanceMode.collectAsStateWithLifecycle()
     val performanceRefreshRate by AppSettings.performanceRefreshRate.collectAsStateWithLifecycle()
@@ -813,6 +834,84 @@ fun SettingsScreen(
                     )
                 }
             }
+            // Only meaningful while Automix is on: both pick how its transitions are
+            // planned, and nothing is planned with it off.
+            if (smartFade) {
+                val automixStyleTitle = stringResource(R.string.automix_mix_style)
+                row(automixStyleTitle, "phrase", "bars", "length", "transition", "mix", "algorithm") {
+                    SettingsRow(
+                        icon = Icons.Rounded.Waves,
+                        title = automixStyleTitle,
+                        subtitle = stringResource(R.string.automix_mix_style_subtitle),
+                        value = automixMixStyle.localizedLabel(),
+                        onClick = { pickingAutomixStyle = true },
+                    )
+                }
+                val automixGestureTitle = stringResource(R.string.automix_gesture)
+                row(automixGestureTitle, "filter", "sweep", "echo", "bass", "transition", "mix", "algorithm") {
+                    SettingsRow(
+                        icon = Icons.Rounded.Tune,
+                        title = automixGestureTitle,
+                        subtitle = stringResource(R.string.automix_gesture_subtitle),
+                        value = automixGesture.localizedLabel(),
+                        onClick = { pickingAutomixGesture = true },
+                    )
+                }
+                val loopReachTitle = stringResource(R.string.loop_reach)
+                row(loopReachTitle, "loop", "instrumental", "vocal", "dj", "transition", "mix", "algorithm") {
+                    SettingsRow(
+                        icon = Icons.Rounded.Waves,
+                        title = loopReachTitle,
+                        subtitle = stringResource(R.string.loop_reach_subtitle),
+                        value = loopMixReach.localizedLabel(),
+                        onClick = { pickingLoopReach = true },
+                    )
+                }
+                val deepAnalysisTitle = stringResource(R.string.deep_analysis)
+                row(deepAnalysisTitle, "analysis", "windows", "loop", "cpu", "battery", "mix", "algorithm") {
+                    SettingsRow(
+                        icon = Icons.Rounded.Tune,
+                        title = deepAnalysisTitle,
+                        subtitle = stringResource(R.string.deep_analysis_subtitle),
+                        trailing = {
+                            IosSwitch(
+                                checked = deepAnalysis,
+                                onCheckedChange = AppSettings::setDeepAnalysis,
+                            )
+                        },
+                        onClick = { AppSettings.setDeepAnalysis(!deepAnalysis) },
+                    )
+                }
+                val mixProfileTitle = stringResource(R.string.mix_profile)
+                row(mixProfileTitle, "profile", "chill", "club", "radio", "dj", "style", "taste") {
+                    SettingsRow(
+                        icon = Icons.Rounded.Tune,
+                        title = mixProfileTitle,
+                        subtitle = stringResource(R.string.mix_profile_subtitle),
+                        value = mixProfile.localizedLabel(),
+                        onClick = { pickingMixProfile = true },
+                    )
+                }
+                val mixIntensityTitle = stringResource(R.string.mix_intensity)
+                row(mixIntensityTitle, "punchy", "gentle", "intensity", "dj", "mix") {
+                    SliderRow(
+                        icon = Icons.Rounded.Waves,
+                        title = mixIntensityTitle,
+                        subtitle = stringResource(R.string.mix_intensity_subtitle),
+                        value = stringResource(
+                            when {
+                                mixIntensity < 35 -> R.string.mix_intensity_gentle
+                                mixIntensity > 65 -> R.string.mix_intensity_punchy
+                                else -> R.string.mix_intensity_normal
+                            },
+                        ),
+                        sliderValue = mixIntensity.toFloat(),
+                        onSliderValue = { AppSettings.setMixIntensity(it.roundToInt()) },
+                        valueRange = 0f..100f,
+                        steps = 9,
+                    )
+                }
+            }
             val skipSilenceTitle = stringResource(R.string.skip_silence)
             row(skipSilenceTitle, "silence") {
                 BypassedByBitPerfect(bitPerfectReady) {
@@ -1011,6 +1110,16 @@ fun SettingsScreen(
                     onClick = { AppSettings.setLegacyMeshGradient(!legacyMeshGradient) },
                 )
             }
+            val visualEffectTitle = stringResource(R.string.visual_effect)
+            row(visualEffectTitle, "visualizer", "spectrum", "animation", "background", "player", "glow") {
+                SettingsRow(
+                    icon = SfIcons.Gradient,
+                    title = visualEffectTitle,
+                    subtitle = stringResource(R.string.visual_effect_subtitle),
+                    value = playerVisualEffect.localizedLabel(),
+                    onClick = { pickingVisualEffect = true },
+                )
+            }
             val animatedCoverArtTitle = stringResource(R.string.animated_cover_art)
             // Carries the keywords of the rows that only appear once it is on,
             // so searching "spotify" with animated covers switched off turns up
@@ -1060,9 +1169,43 @@ fun SettingsScreen(
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis,
                         )
+                        // Switches Spotify in or out of the canvas lookup without
+                        // going through setup; the rest of the row still opens it.
+                        IosSwitch(
+                            checked = spotifyCanvasEnabled,
+                            onCheckedChange = AppSettings::setSpotifyCanvasEnabled,
+                        )
+                        Spacer(Modifier.width(12.dp))
                         Chevron()
                     }
                 }
+            }
+            val lockScreenPlayerTitle = stringResource(R.string.lock_screen_player)
+            row(lockScreenPlayerTitle, "lock", "screen", "canvas", "wake") {
+                SettingsRow(
+                    icon = Icons.Rounded.Lock,
+                    title = lockScreenPlayerTitle,
+                    subtitle = stringResource(R.string.lock_screen_player_subtitle),
+                    badge = "BETA",
+                    trailing = {
+                        IosSwitch(
+                            checked = lockScreenPlayer,
+                            onCheckedChange = { enabled ->
+                                AppSettings.setLockScreenPlayer(enabled)
+                                if (enabled) {
+                                    com.music.bitchord.lockscreen.LockScreenLauncher.requestOverlayPermission(context)
+                                }
+                            },
+                        )
+                    },
+                    onClick = {
+                        val enabled = !lockScreenPlayer
+                        AppSettings.setLockScreenPlayer(enabled)
+                        if (enabled) {
+                            com.music.bitchord.lockscreen.LockScreenLauncher.requestOverlayPermission(context)
+                        }
+                    },
+                )
             }
             val artistSignaturesTitle = stringResource(R.string.artist_signatures)
             row(artistSignaturesTitle, "signature", "artist", "logo") {
@@ -1676,6 +1819,106 @@ fun SettingsScreen(
         }
     }
 
+    if (pickingAutomixStyle) {
+        ModalBottomSheet(
+            onDismissRequest = { pickingAutomixStyle = false },
+            containerColor = MaterialTheme.colorScheme.background,
+        ) {
+            AutomixChoiceSheet(
+                title = stringResource(R.string.automix_mix_style),
+                hint = stringResource(R.string.automix_mix_style_hint),
+                options = AutomixMixStyle.entries,
+                selected = automixMixStyle,
+                label = { it.localizedLabel() },
+                subtitle = { it.localizedSubtitle() },
+                onSelect = { style ->
+                    AppSettings.setAutomixMixStyle(style)
+                    pickingAutomixStyle = false
+                },
+            )
+        }
+    }
+
+    if (pickingAutomixGesture) {
+        ModalBottomSheet(
+            onDismissRequest = { pickingAutomixGesture = false },
+            containerColor = MaterialTheme.colorScheme.background,
+        ) {
+            AutomixChoiceSheet(
+                title = stringResource(R.string.automix_gesture),
+                hint = stringResource(R.string.automix_gesture_hint),
+                options = AutomixGesture.entries,
+                selected = automixGesture,
+                label = { it.localizedLabel() },
+                subtitle = { it.localizedSubtitle() },
+                onSelect = { gesture ->
+                    AppSettings.setAutomixGesture(gesture)
+                    pickingAutomixGesture = false
+                },
+            )
+        }
+    }
+
+    if (pickingLoopReach) {
+        ModalBottomSheet(
+            onDismissRequest = { pickingLoopReach = false },
+            containerColor = MaterialTheme.colorScheme.background,
+        ) {
+            AutomixChoiceSheet(
+                title = stringResource(R.string.loop_reach),
+                hint = stringResource(R.string.loop_reach_hint),
+                options = LoopMix.Reach.entries,
+                selected = loopMixReach,
+                label = { it.localizedLabel() },
+                subtitle = { it.localizedSubtitle() },
+                onSelect = { reach ->
+                    AppSettings.setLoopMixReach(reach)
+                    pickingLoopReach = false
+                },
+            )
+        }
+    }
+
+    if (pickingMixProfile) {
+        ModalBottomSheet(
+            onDismissRequest = { pickingMixProfile = false },
+            containerColor = MaterialTheme.colorScheme.background,
+        ) {
+            AutomixChoiceSheet(
+                title = stringResource(R.string.mix_profile),
+                hint = stringResource(R.string.mix_profile_hint),
+                options = MixProfile.entries,
+                selected = mixProfile,
+                label = { it.localizedLabel() },
+                subtitle = { it.localizedSubtitle() },
+                onSelect = { profile ->
+                    AppSettings.setMixProfile(profile)
+                    pickingMixProfile = false
+                },
+            )
+        }
+    }
+
+    if (pickingVisualEffect) {
+        ModalBottomSheet(
+            onDismissRequest = { pickingVisualEffect = false },
+            containerColor = MaterialTheme.colorScheme.background,
+        ) {
+            AutomixChoiceSheet(
+                title = stringResource(R.string.visual_effect),
+                hint = stringResource(R.string.visual_effect_hint),
+                options = PlayerVisualEffect.entries,
+                selected = playerVisualEffect,
+                label = { it.localizedLabel() },
+                subtitle = { it.localizedSubtitle() },
+                onSelect = { effect ->
+                    AppSettings.setPlayerVisualEffect(effect)
+                    pickingVisualEffect = false
+                },
+            )
+        }
+    }
+
     // Everything in the Cached songs folder goes with it, so say so first.
     if (confirmClearSongCache) {
         AlertDialog(
@@ -1947,6 +2190,175 @@ private fun AutomixPerformanceMode.localizedLabel(): String = stringResource(
         AutomixPerformanceMode.PERFORMANCE -> R.string.automix_mode_performance
     },
 )
+
+@Composable
+private fun AutomixMixStyle.localizedLabel(): String = stringResource(
+    when (this) {
+        AutomixMixStyle.ADAPTIVE -> R.string.automix_style_adaptive
+        AutomixMixStyle.WINDOWED -> R.string.automix_style_windowed
+    },
+)
+
+@Composable
+private fun AutomixMixStyle.localizedSubtitle(): String = stringResource(
+    when (this) {
+        AutomixMixStyle.ADAPTIVE -> R.string.automix_style_adaptive_subtitle
+        AutomixMixStyle.WINDOWED -> R.string.automix_style_windowed_subtitle
+    },
+)
+
+@Composable
+private fun PlayerVisualEffect.localizedLabel(): String = stringResource(
+    when (this) {
+        PlayerVisualEffect.OFF -> R.string.visual_effect_off
+        PlayerVisualEffect.GLOW -> R.string.visual_effect_glow
+        PlayerVisualEffect.BARS -> R.string.visual_effect_bars
+        PlayerVisualEffect.WAVE -> R.string.visual_effect_wave
+    },
+)
+
+@Composable
+private fun PlayerVisualEffect.localizedSubtitle(): String = stringResource(
+    when (this) {
+        PlayerVisualEffect.OFF -> R.string.visual_effect_off_subtitle
+        PlayerVisualEffect.GLOW -> R.string.visual_effect_glow_subtitle
+        PlayerVisualEffect.BARS -> R.string.visual_effect_bars_subtitle
+        PlayerVisualEffect.WAVE -> R.string.visual_effect_wave_subtitle
+    },
+)
+
+@Composable
+private fun MixProfile.localizedLabel(): String = stringResource(
+    when (this) {
+        MixProfile.BALANCED -> R.string.mix_profile_balanced
+        MixProfile.CHILL -> R.string.mix_profile_chill
+        MixProfile.CLUB -> R.string.mix_profile_club
+        MixProfile.RADIO -> R.string.mix_profile_radio
+    },
+)
+
+@Composable
+private fun MixProfile.localizedSubtitle(): String = stringResource(
+    when (this) {
+        MixProfile.BALANCED -> R.string.mix_profile_balanced_subtitle
+        MixProfile.CHILL -> R.string.mix_profile_chill_subtitle
+        MixProfile.CLUB -> R.string.mix_profile_club_subtitle
+        MixProfile.RADIO -> R.string.mix_profile_radio_subtitle
+    },
+)
+
+@Composable
+private fun LoopMix.Reach.localizedLabel(): String = stringResource(
+    when (this) {
+        LoopMix.Reach.STRICT -> R.string.loop_reach_strict
+        LoopMix.Reach.WIDE -> R.string.loop_reach_wide
+        LoopMix.Reach.LOOSE -> R.string.loop_reach_loose
+    },
+)
+
+@Composable
+private fun LoopMix.Reach.localizedSubtitle(): String = stringResource(
+    when (this) {
+        LoopMix.Reach.STRICT -> R.string.loop_reach_strict_subtitle
+        LoopMix.Reach.WIDE -> R.string.loop_reach_wide_subtitle
+        LoopMix.Reach.LOOSE -> R.string.loop_reach_loose_subtitle
+    },
+)
+
+@Composable
+private fun AutomixGesture.localizedLabel(): String = stringResource(
+    when (this) {
+        AutomixGesture.AUTO -> R.string.automix_gesture_auto
+        AutomixGesture.SWEEP -> R.string.automix_gesture_sweep
+        AutomixGesture.BASS_HANDOFF -> R.string.automix_gesture_bass_handoff
+        AutomixGesture.ECHO_RIDE -> R.string.automix_gesture_echo_ride
+    },
+)
+
+@Composable
+private fun AutomixGesture.localizedSubtitle(): String = stringResource(
+    when (this) {
+        AutomixGesture.AUTO -> R.string.automix_gesture_auto_subtitle
+        AutomixGesture.SWEEP -> R.string.automix_gesture_sweep_subtitle
+        AutomixGesture.BASS_HANDOFF -> R.string.automix_gesture_bass_handoff_subtitle
+        AutomixGesture.ECHO_RIDE -> R.string.automix_gesture_echo_ride_subtitle
+    },
+)
+
+/** A single-choice picker in the same shape as [AutomixPerformanceSheet], for any option type. */
+@Composable
+private fun <T> AutomixChoiceSheet(
+    title: String,
+    hint: String,
+    options: List<T>,
+    selected: T,
+    label: @Composable (T) -> String,
+    subtitle: @Composable (T) -> String,
+    onSelect: (T) -> Unit,
+) {
+    val haptics = LocalHapticFeedback.current
+    Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
+        Row(
+            modifier = Modifier.padding(start = 22.dp, end = 22.dp, bottom = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Tune,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onBackground,
+                modifier = Modifier.size(22.dp),
+            )
+            Spacer(Modifier.width(14.dp))
+            Column {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onBackground,
+                )
+                Text(
+                    text = hint,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        HorizontalDivider(thickness = 0.5.dp, color = MaterialTheme.colorScheme.outline)
+        options.forEach { option ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        onSelect(option)
+                    }
+                    .padding(horizontal = 22.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = label(option),
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
+                    Text(
+                        text = subtitle(option),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (option == selected) {
+                    Spacer(Modifier.width(12.dp))
+                    Icon(
+                        Icons.Rounded.Check,
+                        contentDescription = stringResource(R.string.selected),
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(22.dp),
+                    )
+                }
+            }
+        }
+    }
+}
 
 /**
  * Hands the device's own effect panel this app's audio session.

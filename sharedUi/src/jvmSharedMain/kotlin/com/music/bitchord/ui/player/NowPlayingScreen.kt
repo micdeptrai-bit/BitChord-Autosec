@@ -69,6 +69,8 @@ import androidx.compose.material.icons.rounded.FastRewind
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.IosShare
 import androidx.compose.material.icons.rounded.MoreHoriz
+import androidx.compose.material.icons.rounded.Videocam
+import androidx.compose.material.icons.rounded.VideocamOff
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -859,6 +861,8 @@ fun NowPlayingScreen(
     // CanvasRepository, which is also where the "is this actually the right
     // track" check lives.
     val spotifyCanvasAutoHide by PlayerSettings.spotifyCanvasAutoHide.collectAsStateWithLifecycle()
+    val spotifyCanvasEnabled by PlayerSettings.spotifyCanvasEnabled.collectAsStateWithLifecycle()
+    val animatedCanvasEnabled by PlayerSettings.animatedCanvas.collectAsStateWithLifecycle()
     val mixing by PlayerSettings.smartMixInProgress.collectAsStateWithLifecycle()
     // A music video plays its own picture where the sleeve is — see
     // [MusicVideoSurface] — and takes the place of any animated cover.
@@ -3625,6 +3629,31 @@ fun NowPlayingScreen(
                                     onClick = onToggleLike,
                                     active = liked,
                                     haptic = if (liked) Haptic.ToggleOff else Haptic.ToggleOn,
+                                )
+                                Spacer(Modifier.width(8.dp))
+                            }
+                            // The Spotify Canvas switch, within reach of the clip it
+                            // controls. Offered while a Spotify clip is the one on
+                            // screen, and while Spotify is switched off so that it can be
+                            // switched back on from here: with it off there is no clip to
+                            // hang the button on. Nothing when canvases are off outright,
+                            // since then it would change nothing, and nothing under the
+                            // lyrics, which have the glyph slot to themselves.
+                            if (animatedCanvasEnabled && !lyricsOpen &&
+                                (canvas?.source == CanvasSource.SPOTIFY || !spotifyCanvasEnabled)
+                            ) {
+                                CircleGlyph(
+                                    icon = if (spotifyCanvasEnabled) Icons.Rounded.Videocam else Icons.Rounded.VideocamOff,
+                                    contentDescription = stringResource(
+                                        if (spotifyCanvasEnabled) {
+                                            Res.string.spotify_canvas_turn_off
+                                        } else {
+                                            Res.string.spotify_canvas_turn_on
+                                        },
+                                    ),
+                                    onClick = { PlayerSettings.setSpotifyCanvasEnabled(!spotifyCanvasEnabled) },
+                                    active = spotifyCanvasEnabled,
+                                    haptic = if (spotifyCanvasEnabled) Haptic.ToggleOff else Haptic.ToggleOn,
                                 )
                                 Spacer(Modifier.width(8.dp))
                             }

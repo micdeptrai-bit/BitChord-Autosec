@@ -40,7 +40,13 @@ class AdvancedAutomixPlannerTest {
         )
     }
 
-    private fun plan(current: TrackAnalysis, next: TrackAnalysis, advanced: Boolean) = planTransition(
+    private fun plan(
+        current: TrackAnalysis,
+        next: TrackAnalysis,
+        advanced: Boolean,
+        preferred: FilterTransitionVariant? = null,
+        tuning: MixTuning = MixTuning.DEFAULT,
+    ) = planTransition(
         analysis = current,
         nextAnalysis = next,
         currentTrack = TransitionTrackInfo(current.trackId, (current.duration * 1000).toLong()),
@@ -49,7 +55,42 @@ class AdvancedAutomixPlannerTest {
         duration = current.duration,
         mode = CrossfadeMode.SMART,
         advanced = advanced,
+        preferredFilterVariant = preferred,
+        tuning = tuning,
     )
+
+    @Test
+    fun theDefaultTuningPlansExactlyAsBefore() {
+        val kicks = track("a", 120.0, "C major", vocal = 0.1, bass = 1.0)
+        val kicksNext = track("b", 94.0, "C major", vocal = 0.1, bass = 1.0)
+        assertEquals(
+            plan(kicks, kicksNext, advanced = true),
+            plan(kicks, kicksNext, advanced = true, tuning = MixTuning(MixProfile.BALANCED, MixTuning.DEFAULT_INTENSITY)),
+        )
+    }
+
+    @Test
+    fun theProfilesPickTheirGestureForAPairWithKicksOnBothSides() {
+        val kicks = track("a", 120.0, "C major", vocal = 0.1, bass = 1.0)
+        val kicksNext = track("b", 94.0, "C major", vocal = 0.1, bass = 1.0)
+        assertEquals(
+            FilterTransitionVariant.BASS_HANDOFF,
+            plan(kicks, kicksNext, advanced = true, tuning = MixTuning(MixProfile.CLUB)).filterVariant,
+        )
+        assertEquals(
+            FilterTransitionVariant.SWEEP,
+            plan(kicks, kicksNext, advanced = true, tuning = MixTuning(MixProfile.CHILL)).filterVariant,
+        )
+    }
+
+    @Test
+    fun aRadioTuningNeverOverlapsPastItsShortenedCeiling() {
+        val kicks = track("a", 120.0, "C major", vocal = 0.1, bass = 1.0)
+        val kicksNext = track("b", 94.0, "C major", vocal = 0.1, bass = 1.0)
+        val radio = plan(kicks, kicksNext, advanced = true, tuning = MixTuning(MixProfile.RADIO))
+        // The longest an unmatched pair's overlap runs is 8 s, scaled by the profile.
+        assertTrue(radio.fadeSeconds <= 8.0 * MixTuning(MixProfile.RADIO).lengthScale + 1e-6)
+    }
 
     @Test
     fun offLeavesEveryPlanAsItWas() {
@@ -92,6 +133,21 @@ class AdvancedAutomixPlannerTest {
         val plan = plan(current, next, advanced = true)
         assertEquals(TransitionStyle.DJ_FILTER, plan.transitionStyle)
         assertTrue(plan.fadeSeconds <= 8.0, "fallback should stay compact: ${plan.fadeSeconds}s")
+    }
+
+    @Test
+    fun aForcedGestureReplacesThePerPairPick() {
+        val kicks = track("a", 120.0, "C major", vocal = 0.1, bass = 1.0)
+        val kicksNext = track("b", 94.0, "C major", vocal = 0.1, bass = 1.0)
+        val sparseNext = track("c", 94.0, "C major", vocal = 0.1)
+        assertEquals(
+            FilterTransitionVariant.SWEEP,
+            plan(kicks, kicksNext, advanced = true, preferred = FilterTransitionVariant.SWEEP).filterVariant,
+        )
+        assertEquals(
+            FilterTransitionVariant.BASS_HANDOFF,
+            plan(kicks, sparseNext, advanced = true, preferred = FilterTransitionVariant.BASS_HANDOFF).filterVariant,
+        )
     }
 
     @Test

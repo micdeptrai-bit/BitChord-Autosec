@@ -31,6 +31,12 @@ enum class TrackAnalysisState {
 data class SmartAnalysis(
     val current: TrackAnalysisState = TrackAnalysisState.WAITING,
     val next: TrackAnalysisState = TrackAnalysisState.WAITING,
+    /** Whole BPM of the playing track, or 0 until it has been measured. */
+    val currentBpm: Int = 0,
+    /** The playing track's key as shown to a listener ("A minor · 8A"), or blank when unknown. */
+    val currentKey: String = "",
+    val nextBpm: Int = 0,
+    val nextKey: String = "",
 )
 
 /**

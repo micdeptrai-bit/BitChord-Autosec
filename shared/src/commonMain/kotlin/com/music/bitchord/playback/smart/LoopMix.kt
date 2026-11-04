@@ -102,6 +102,28 @@ object LoopMix {
     const val HIGH_PASS_FROM_HZ = 20.0
     const val HIGH_PASS_TO_HZ = 1500.0
 
+    /**
+     * How far [plan] looks, and how much singing it forgives, before it gives up
+     * on a pair. [STRICT] is what shipped. The others find a loop for more pairs,
+     * at the price of cutting the outgoing song's ending a little shorter
+     * ([WIDE]) or of a faint, repeated vocal inside the loop ([LOOSE]). The
+     * searches reach only as far as the analyser measured: by default about the
+     * last 90 s of the outgoing song and the first 60 s of the incoming one, and
+     * about 150 s and 90 s with "Deep analysis" on.
+     */
+    enum class Reach(
+        val outSearchSec: Double,
+        val inSearchSec: Double,
+        val maxSungShare: Double,
+        val maxSungRunSec: Double,
+        /** False ignores synced lyrics, leaving the verdict to the vocal model's mask alone. */
+        val trustLyrics: Boolean,
+    ) {
+        STRICT(OUT_SEARCH_SEC, IN_SEARCH_SEC, MAX_SUNG_SHARE, MAX_SUNG_RUN_SEC, true),
+        WIDE(140.0, 80.0, MAX_SUNG_SHARE, MAX_SUNG_RUN_SEC, true),
+        LOOSE(140.0, 80.0, 0.15, 0.6, false),
+    }
+
     /** What said a loop is instrumental: the lyrics, the vocal mask, or the lyrics with the mask past an open line. */
     enum class Check { LYRICS, MASK, LYRICS_AND_MASK }
 
@@ -172,6 +194,7 @@ object LoopMix {
         inVideo: Boolean = false,
         /** Filled with why there is no plan, when there isn't one. */
         why: StringBuilder? = null,
+        reach: Reach = Reach.STRICT,
     ): Plan? {
         if (outVideo || inVideo) return null.also { why?.append("a music video") }
         val outGrid = constantGrid(out) ?: return null.also { why?.append("no grid on the outgoing song") }
@@ -181,23 +204,25 @@ object LoopMix {
 
         // outgoing: the latest instrumental loop that ends before the song does
         val outEnd = outDuration - 0.5
-        val outFirst = max(earliestOutSec, outDuration - OUT_SEARCH_SEC)
+        val outFirst = max(earliestOutSec, outDuration - reach.outSearchSec)
         val outPick = firstClean(
             candidates = { bars -> loopsBetween(out.tailBeats, outGrid, outFirst, outEnd, bars).asReversed() },
             analysis = out,
-            sung = sungOut,
+            spans = sungOut,
             beatSec = outGrid.beatSec,
             count = outCount,
+            reach = reach,
         ) ?: return null.also { why?.append("outgoing: ")?.append(outCount) }
 
         // incoming: the earliest instrumental loop in its opening
-        val inEnd = min(IN_SEARCH_SEC + LOOP_BARS * inGrid.barSec, inDuration - 20)
+        val inEnd = min(reach.inSearchSec + LOOP_BARS * inGrid.barSec, inDuration - 20)
         val inPick = firstClean(
             candidates = { bars -> loopsBetween(inn.headBeats, inGrid, 0.0, inEnd, bars) },
             analysis = inn,
-            sung = sungIn,
+            spans = sungIn,
             beatSec = inGrid.beatSec,
             count = inCount,
+            reach = reach,
         ) ?: return null.also { why?.append("incoming: ")?.append(inCount) }
 
         val outBeat = (outPick.end - outPick.start) / (outPick.bars * 4)
@@ -324,10 +349,12 @@ object LoopMix {
     private fun firstClean(
         candidates: (Int) -> List<Loop>,
         analysis: TrackAnalysis,
-        sung: List<Span>?,
+        spans: List<Span>?,
         beatSec: Double,
         count: Rejections,
+        reach: Reach,
     ): Clean? {
+        val sung = if (reach.trustLyrics) spans else null
         for (bars in LOOP_LENGTHS) {
             val loops = candidates(bars)
             if (loops.isEmpty()) continue
@@ -355,7 +382,7 @@ object LoopMix {
                         count.unmasked++
                         continue
                     }
-                    if (mask.share > MAX_SUNG_SHARE || mask.longestRunSec > MAX_SUNG_RUN_SEC) {
+                    if (mask.share > reach.maxSungShare || mask.longestRunSec > reach.maxSungRunSec) {
                         count.sung++
                         continue
                     }
@@ -366,7 +393,7 @@ object LoopMix {
                     count.unmasked++
                     continue
                 }
-                if (mask.share > MAX_SUNG_SHARE || mask.longestRunSec > MAX_SUNG_RUN_SEC) {
+                if (mask.share > reach.maxSungShare || mask.longestRunSec > reach.maxSungRunSec) {
                     count.sung++
                     continue
                 }

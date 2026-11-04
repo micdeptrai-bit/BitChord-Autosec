@@ -296,6 +296,22 @@ private const val KICK_PRESENT = 0.5
  * [FilterTransitionVariant.ECHO_RIDE] is never chosen: a beat echo at the
  * outgoing tempo flams over an incoming track at another one.
  */
+/** True when both ends have a kick under the join, false when one lacks it, null without a low-end measurement. */
+private fun kicksOnBothSides(
+    analysis: TrackAnalysis,
+    nextAnalysis: TrackAnalysis,
+    exitAt: Double,
+    beatSeconds: Double,
+): Boolean? {
+    val window = ENERGY_WINDOW_BEATS * (beatSeconds.takeIf { it > 0 } ?: 0.5)
+    val entry = incomingStartPoint(nextAnalysis)
+    val outReference = lowEnergyReference(analysis.lowEnergyCurve) ?: return null
+    val inReference = lowEnergyReference(nextAnalysis.lowEnergyCurve) ?: return null
+    val out = averageEnergy(analysis.lowEnergyCurve, exitAt - window, exitAt) ?: return null
+    val into = averageEnergy(nextAnalysis.lowEnergyCurve, entry, entry + window) ?: return null
+    return out / outReference >= KICK_PRESENT && into / inReference >= KICK_PRESENT
+}
+
 private fun fallbackVariantFor(
     analysis: TrackAnalysis,
     nextAnalysis: TrackAnalysis,
@@ -1401,6 +1417,9 @@ private fun analysisReadyForTrack(analysis: TrackAnalysis, track: TransitionTrac
  *   support a bar-aligned mix of that length — no trusted tempo, or too short
  *   to fit it — falls back to the ordinary smart plan rather than forcing a
  *   ragged one.
+ * @param preferredFilterVariant Forces the gesture used when tempi are too far apart to
+ *   beatmatch. Null (the default) keeps the per-pair pick of [filterVariantFor]. Only honoured
+ *   when [advanced] is on, like the variant it replaces.
  * @param mixWindow Confine the mix to the last and first [MIX_WINDOW_SECONDS] of the pair — see
  *   [clampToMixWindow]. The desktop asks for it; the phone leaves it off, so its plans are
  *   unchanged.
@@ -1419,6 +1438,8 @@ fun planTransition(
     advanced: Boolean = false,
     phraseBars: Int = 0,
     mixWindow: Boolean = false,
+    preferredFilterVariant: FilterTransitionVariant? = null,
+    tuning: MixTuning = MixTuning.DEFAULT,
 ): TransitionPlan {
     val plan = planTransitionInner(
         analysis = analysis,
@@ -1433,6 +1454,8 @@ fun planTransition(
         albumSequential = albumSequential,
         advanced = advanced,
         phraseBars = phraseBars,
+        preferredFilterVariant = preferredFilterVariant,
+        tuning = tuning,
     )
     if (!mixWindow) return plan
     return clampToMixWindow(
@@ -1481,6 +1504,8 @@ private fun planTransitionInner(
     albumSequential: Boolean = false,
     advanced: Boolean = false,
     phraseBars: Int = 0,
+    preferredFilterVariant: FilterTransitionVariant? = null,
+    tuning: MixTuning = MixTuning.DEFAULT,
 ): TransitionPlan {
     val length = max(duration.orZero(), trackDurationSeconds(currentTrack))
     val playbackTime = max(0.0, currentTime.orZero())
@@ -1642,7 +1667,7 @@ private fun planTransitionInner(
         }
 
     val traits = if (advanced) PairTraits(analysis, nextAnalysis) else null
-    val primary = mixPlan(analysis, nextAnalysis, mixAnchor, mixOutAnchor.type, nextLength, traits)
+    val primary = mixPlan(analysis, nextAnalysis, mixAnchor, mixOutAnchor.type, nextLength, traits, preferredFilterVariant, tuning)
     // An exit where the outgoing track is still singing over the incoming one
     // is worth trading for another the analysis ranked, if one halves the
     // collision. Only planned while it could still be taken: once the playhead
@@ -1654,7 +1679,7 @@ private fun planTransitionInner(
         rankedMixOuts.asSequence()
             .filter { abs(it.time - mixAnchor) > 1.0 && it.time <= length }
             .take(MAX_REROUTE_CANDIDATES)
-            .map { mixPlan(analysis, nextAnalysis, it.time, it.type, nextLength, traits) }
+            .map { mixPlan(analysis, nextAnalysis, it.time, it.type, nextLength, traits, preferredFilterVariant, tuning) }
             .filter { playbackTime < it.transitionStart }
             .minByOrNull { it.vocalOverlap }
             ?.takeIf { it.vocalOverlap <= primary.vocalOverlap * VOCAL_REROUTE_GAIN }
@@ -1686,12 +1711,24 @@ private fun mixPlan(
     mixOutType: String,
     nextLength: Double,
     traits: PairTraits?,
+    preferredFilterVariant: FilterTransitionVariant? = null,
+    tuning: MixTuning = MixTuning.DEFAULT,
 ): TransitionPlan {
     val currentBpm = analysis.bpm.orZero()
     val nextBpm = nextAnalysis.bpm.orZero()
     val gridBeatSeconds = if (traits?.outgoingGrid == true) 60 / currentBpm else 0.0
     val filterVariant = if (traits != null) {
-        fallbackVariantFor(analysis, nextAnalysis, mixAnchor, if (currentBpm > 0) 60 / currentBpm else 0.0)
+        preferredFilterVariant
+            ?: tuning.pickVariant(
+                VariantSignals(
+                    kicksOnBothSides = kicksOnBothSides(
+                        analysis, nextAnalysis, mixAnchor, if (currentBpm > 0) 60 / currentBpm else 0.0,
+                    ),
+                    keyClash = traits.keyClash,
+                    vocalConflict = traits.vocalConflict,
+                ),
+            )
+            ?: fallbackVariantFor(analysis, nextAnalysis, mixAnchor, if (currentBpm > 0) 60 / currentBpm else 0.0)
     } else {
         FilterTransitionVariant.SWEEP
     }
@@ -1732,13 +1769,15 @@ private fun mixPlan(
         FilterTransitionVariant.BASS_HANDOFF -> 7.0
         FilterTransitionVariant.ECHO_RIDE -> 7.0
     }
-    val maxSeconds = when {
+    val baseMaxSeconds = when {
         traits != null && !sameBeatBlend -> fallbackMaxSeconds
         traits != null && energy > 1 -> CALM_MAX_SECONDS
         else -> AUTO_TRANSITION_MAX_SECONDS
     }
+    // The listener's taste scales the ceiling only; the caps below (the songs' own lengths) still bind.
+    val maxSeconds = baseMaxSeconds * tuning.lengthScale
     val maximumOverlap = minOf(
-        if (handoffBpm > 0) (maxBeats * 60) / handoffBpm else maxSeconds,
+        if (handoffBpm > 0) ((maxBeats * 60) / handoffBpm) * tuning.lengthScale else maxSeconds,
         maxSeconds,
         mixEnd * 0.4,
         if (nextLength > 0) nextLength * 0.4 else maxSeconds,
@@ -1855,7 +1894,7 @@ private fun mixPlan(
         // pair has no shared grid to hand anything over on and instead pulls the
         // outgoing track behind a closing low-pass. Left at zero on the blend
         // branch so the renderer doesn't do both at once.
-        filterSweep = if (sameBeatBlend) 0.0 else FILTER_SWEEP,
+        filterSweep = if (sameBeatBlend) 0.0 else FILTER_SWEEP * tuning.sweepScale,
         filterVariant = if (sameBeatBlend) FilterTransitionVariant.SWEEP else resolvedFilterVariant,
         vocalOverlap = vocalOverlap,
         beatSeconds = gridBeatSeconds,

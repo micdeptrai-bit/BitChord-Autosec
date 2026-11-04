@@ -204,6 +204,15 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
     private val store = AnalysisStore { context.filesDir }
 
     /**
+     * The same, for results measured over the wider windows of "Deep analysis". Kept in a
+     * folder of its own so that a shallow result is never mistaken for a deep one, or the
+     * other way round, when the setting is flipped.
+     */
+    private val deepStore = AnalysisStore { java.io.File(context.filesDir, "deep-analysis") }
+
+    private fun activeStore(): AnalysisStore = if (AppSettings.deepAnalysis.value) deepStore else store
+
+    /**
      * Cache keys of renditions that decoded short despite the cache calling them
      * complete. Keyed by rendition rather than by track, because the point is to
      * send the next attempt at the *same* track to a different copy of it.
@@ -268,7 +277,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         // rather than on every tick.
         if (!restoreAttempted.add(trackId)) return
         executor.execute {
-            val stored = store.load(trackId) ?: return@execute
+            val stored = activeStore().load(trackId) ?: return@execute
             Log.d(TAG, "Restored analysis for $trackId: bpm=${stored.bpm} conf=${stored.beatConfidence}")
             results.putIfAbsent(trackId, stored)
         }
@@ -450,7 +459,7 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
                         // mix-out anchor, the energy curve — and storing one
                         // would freeze a deliberately partial answer in place of
                         // the complete one that supersedes it minutes later.
-                        store.save(trackId, whole)
+                        activeStore().save(trackId, whole)
                         restoreAttempted.add(trackId)
                     } else if (outcome.decodedShort &&
                         shortDecodes.merge(trackId, 1, Int::plus)!! >= MAX_SHORT_DECODE_ATTEMPTS
@@ -1096,8 +1105,10 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         val span = modelWindowSeconds()
         // Spans that the windows tile exactly, overlaps included: one window more
         // here is a whole extra pass of both models.
-        val headEnd = minOf(effectiveDuration, HEAD_MODEL_WINDOWS * span - (HEAD_MODEL_WINDOWS - 1) * WINDOW_OVERLAP_SECONDS)
-        val tailStart = max(0.0, effectiveDuration - (TAIL_MODEL_WINDOWS * span - (TAIL_MODEL_WINDOWS - 1) * WINDOW_OVERLAP_SECONDS))
+        val headWindows = if (AppSettings.deepAnalysis.value) DEEP_HEAD_MODEL_WINDOWS else HEAD_MODEL_WINDOWS
+        val tailWindows = if (AppSettings.deepAnalysis.value) DEEP_TAIL_MODEL_WINDOWS else TAIL_MODEL_WINDOWS
+        val headEnd = minOf(effectiveDuration, headWindows * span - (headWindows - 1) * WINDOW_OVERLAP_SECONDS)
+        val tailStart = max(0.0, effectiveDuration - (tailWindows * span - (tailWindows - 1) * WINDOW_OVERLAP_SECONDS))
         val regions = ArrayList<Region>()
         for ((from, to) in modelWindows(headEnd, tailStart, effectiveDuration, span)) {
             // Checked between windows: an abort leaves a window missing, which
@@ -1586,6 +1597,10 @@ class TrackAnalyzer(private val context: Context, private val cache: AudioCache)
         /** Model windows over the opening (~45 s) and the ending (~68 s); see [modelWindowSeconds]. */
         const val HEAD_MODEL_WINDOWS = 2
         const val TAIL_MODEL_WINDOWS = 3
+
+        /** The windows "Deep analysis" runs instead: each one more is a whole extra pass of both models. */
+        const val DEEP_HEAD_MODEL_WINDOWS = 3
+        const val DEEP_TAIL_MODEL_WINDOWS = 5
 
         /** Overlap between neighbouring model windows, so a beat on a seam is seen from both sides. */
         const val WINDOW_OVERLAP_SECONDS = 1.0

@@ -277,4 +277,26 @@
     <string name="mix_view_one_bar">1 Bar</string>
     <string name="mix_view_seconds">%1$d sec</string>
     <string name="mix_view_bpm">%1$d bpm</string>
+    <string name="mix_label">Mix</string>
+    <string name="mix_title">Mix</string>
+    <string name="mix_settings">Mix settings</string>
+    <string name="mix_hint">DJ-style transitions between songs. Applies to every song.</string>
+    <string name="mix_length">Transition length</string>
+    <string name="mix_length_auto">Auto</string>
+    <string name="mix_length_8">8 bars</string>
+    <string name="mix_length_16">16 bars</string>
+    <string name="mix_style">Transition style</string>
+    <string name="mix_style_auto">Auto</string>
+    <string name="mix_style_crossfade">Plain crossfade</string>
+    <string name="mix_off_note">Turn Mix on to change these.</string>
+    <string name="spotify_canvas_turn_off">Turn off Spotify Canvas</string>
+    <string name="spotify_canvas_turn_on">Turn on Spotify Canvas</string>
+    <string name="mix_style_classic">Classic</string>
+    <string name="mix_style_quick_cut">Quick cut</string>
+    <string name="mix_style_long_fade">Long fade</string>
+    <string name="mix_style_auto_desc">DJ mix: Automix beat-matches, aligns phrases and picks the best moment for each pair.</string>
+    <string name="mix_style_crossfade_desc">A plain 6-second fade between songs. No beat-matching. The length setting above does not apply.</string>
+    <string name="mix_style_classic_desc">The original Automix: simpler, and it matches tempo by speeding the next song up or down.</string>
+    <string name="mix_style_quick_cut_desc">A 1-second cut as one song ends and the next begins, like radio. The length setting above does not apply.</string>
+    <string name="mix_style_long_fade_desc">A 12-second fade so songs melt into each other. The length setting above does not apply.</string>
 </resources>
