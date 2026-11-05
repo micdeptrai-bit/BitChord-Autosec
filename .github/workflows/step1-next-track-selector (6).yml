@@ -1,0 +1,2226 @@
+name: "Bước 1+2+3 - Chọn bài kế tiếp + kiểu chuyển cắt + engine overlap native (AI DJ)"
+
+# ======================================================================================
+# GHI CHÚ BÀN GIAO (để làm tiếp ở chat mới nếu hết quota: dán nguyên file này vào chat)
+# ======================================================================================
+# MỤC TIÊU DÀI HẠN: Automix của BitChord mix kiểu Spotify/Apple Music (không chỉ crossfade).
+# Lộ trình đã thống nhất:
+#   0. Bàn nghe thử offline: render transition của 2 file ra WAV trên máy tính.
+#   1. Bộ chọn bài kế tiếp (FILE NÀY): sắp lại bài autoplay theo BPM / key Camelot / năng lượng / vocal.
+#   2. Thêm kiểu chuyển: quick cut trên downbeat + echo/reverb, drop swap, loop roll.
+#   3. Gộp về một engine native (mở rộng renderer loop mix của Signalsmith thành "render cả đoạn overlap").
+#   4. Stem thật (thêm model bass/drums của Open-Unmix, chỉ chạy trên đoạn transition, tuỳ chọn).
+#   5. "AI" đúng nghĩa: log skip trong 10 giây sau transition để tự chỉnh ngưỡng; giọng DJ = LLM + TTS (tách khỏi audio).
+#
+# BƯỚC 1 LÀM GÌ
+#   - shared/.../playback/smart/NextTrackSelector.kt   (logic thuần, có test): chấm điểm từng cặp bài
+#       tempo 40% (gập octave, cửa sổ stretch 0.9-1.25, lưới nhịp kém tin cậy bị trừ),
+#       key 30% (bánh xe Camelot, kể cả major/minor tương đối), năng lượng outro->intro 15%,
+#       vocal 15% (cả hai cùng hát bị trừ). Bài chưa phân tích = "không rõ" (0.5), giữ nguyên thứ tự radio.
+#       Thứ tự radio vẫn là tie-breaker nhẹ (trừ 0.012 mỗi hạng, tối đa 0.3).
+#   - app/.../playback/AutoplaySequencer.kt            : đọc analysis đã có (bài đang phát + bài từng phân tích),
+#       sắp lại danh sách radio TRƯỚC khi QueueBuilder.extend chọn. Không bao giờ tự bắt đầu phân tích.
+#   - Vá Autoplay.kt (thêm tham số after + gọi sequencer) và PlaybackService.kt (cài/gỡ lookup, truyền bài cuối hàng đợi).
+#   - shared/.../NextTrackSelectorTest.kt              : test.
+#
+# GIỚI HẠN ĐÃ BIẾT (đây là lý do có bước 1b)
+#   - Chỉ có tác dụng khi bài đứng trước (queue tail hoặc bài đang phát) VÀ ứng viên đã có analysis trên đĩa.
+#     Mỗi lần đổi bài autoplay chỉ bù 1 bài, mà đuôi hàng đợi thường chưa phân tích => lúc đó là no-op.
+#     Hiệu quả rõ nhất ở lô đầu (radio vừa bắt đầu, bài đang phát đã phân tích).
+#   - BƯỚC 1b (chưa làm): tự phân tích trước 2-3 bài đầu autoplay ở nền (TrackAnalyzer.request với
+#     AutomixAnalysisSource.opusUri(videoId)), rồi sắp lại phần còn chưa phát. Cần kiểm tra cách resolve URI và pin.
+#   - Chưa có công tắc trong Cài đặt: tắt bằng AutoplaySequencer.enabled = false (cần thêm AppSettings + UI nếu muốn).
+#   - Phát hiện thêm: harmonicallyCompatible() trong TransitionPlanner.kt coi C major <-> A minor (tương đối,
+#     cặp hợp nhất) là KHÔNG hợp (nó so khoảng cách nửa cung). Selector mới dùng Camelot nên đúng; nên sửa luôn
+#     cả planner ở bước sau.
+#   - Code này CHƯA được biên dịch khi viết (môi trường soạn không có Kotlin). Workflow chạy test rồi build để kiểm tra.
+#     Nếu lỗi compile: tải artifact "build-log", gửi lại để sửa.
+#
+# BƯỚC 2 LÀM GÌ (đã nối vào cùng file này; chạy cùng bước 1)
+#   - shared/.../playback/smart/TransitionRepertoire.kt (logic thuần, có test): với cặp "unmixable"
+#       (tempo ngoài tầm stretch + lệch key hoặc cả hai cùng hát), thay vì crossfade phẳng 6s, chọn 1 trong 3 kiểu:
+#       QUICK_CUT  rời bài cũ ở downbeat/ranh giới câu nhạc, vào bài mới đúng downbeat (loud -> loud).
+#       DROP_CUT   như trên nhưng cue bài mới vào đoạn drop (bước nhảy năng lượng >= 1.5x), tối đa 25% đầu bài.
+#       ECHO_CUT   echo-out 8 beat đè lên intro êm của bài mới (chỉ khi KHÔNG cả hai cùng hát, còn chỗ cho đuôi echo).
+#       Không đủ bằng chứng (thiếu lưới nhịp tin cậy, thiếu đường năng lượng, cuối bài nhỏ) -> trả null,
+#       planner chạy crossfade cũ y nguyên.
+#   - Chỉ bật khi Advanced Automix bật. Automix thường (classic) không đổi.
+#   - Chỉ dùng field renderer đã hiểu (EQUAL_POWER + fade 0.5s; echo dùng đường echo-out có sẵn) => KHÔNG đổi enum,
+#       KHÔNG đụng renderer. Vá TransitionPlanner.kt đúng 1 chỗ (nhánh isUnmixablePair) + 1 dòng nhãn UI trong CrossfadeController.kt.
+#   - Test cũ anUnmixablePairIsCrossfadedAtTheEndIntoTheIntro ghim hành vi crossfade phẳng => patch tắt repertoire trong test đó.
+#   - Công tắc: TransitionRepertoire.enabled / TransitionRepertoire.echoCutEnabled (input echo_cut của workflow đặt mặc định cho cái sau).
+#
+# GIỚI HẠN CỦA BƯỚC 2 (đọc kỹ)
+#   - ECHO-OUT TỪNG BỊ TẮT TRONG PLANNER (mixPlan: "echoSeconds = 0.0"): lặp echo theo tempo bài cũ bị lệch (flam) với bài mới,
+#       và lúc dập tiếng khô nghe như bài bị cắt. ECHO_CUT chỉ lên kế hoạch trên intro êm của bài mới, nhưng đây là kiểu phải NGHE THỬ
+#       đầu tiên. Nghe dở thì chạy lại workflow với echo_cut = false (QUICK_CUT/DROP_CUT vẫn giữ).
+#   - "Drop swap" cho cặp khớp tempo ĐÃ CÓ sẵn trong mixPlan (incomingHandoffTime = drop, cue lùi sao cho drop rơi đúng cuối overlap),
+#       nên bước 2 chỉ thêm "cut tới drop" cho cặp unmixable, không viết lại drop swap.
+#   - LOOP ROLL chưa làm (cần chạm LoopMix + renderer native) => để bước 2b.
+#   - Mốc cắt tối đa 20s trước hết bài; ngưỡng (LOUD 0.6, QUIET 0.55, DROP_STEP 1.5) là ước lượng, chưa chỉnh bằng tai.
+#   - Code CHƯA được biên dịch khi viết. Workflow chạy test rồi build; lỗi compile thì tải artifact "build-log" gửi lại.
+#
+# BƯỚC 3 LÀM GÌ (3a: nền móng gộp engine; đã nối vào cùng file này, chạy cùng bước 1+2)
+#   Mục tiêu: các kiểu chuyển của bước 2 (QUICK_CUT / DROP_CUT / ECHO_CUT) không còn đi qua 2 ExoPlayer + chỉnh volume,
+#   mà do CÙNG renderer native của loop mix dựng (một clock, sink bài cũ tiếp quản chính xác từng sample, gain equal-power
+#   tính trong renderer, echo thật). Dùng lại nguyên đường LOOP_ARMING -> LOOP_RUNNING của controller (căn pha player bài mới,
+#   handover 25 ms, bail/finish), nên không viết state machine thứ hai.
+#   - native/loopmix: Deck có thêm ECHO (feedback delay; envelope "send" kind=3; đuôi vẫn ngân sau khi send đóng).
+#       Thêm JNI nativeSetEcho + LoopMixRenderer.setEcho / KIND_ECHO_SEND. Có test native chạy ngay trong workflow
+#       (native/loopmix/tests/echo_test.cpp: lặp lại ×0.8, rồi ×0.5, ×0.5, đuôi tắt sạch).
+#   - shared/.../smart/MixTimeline.kt: interface chung (takeover, beatTimes, handoffAt, elementAt, positionAt...).
+#       LoopMix.Clock giờ implements nó (chỉ thêm `override`, hành vi y nguyên; LoopMixTest được chạy để chắc).
+#   - shared/.../smart/OverlapMix.kt (logic thuần, có test): từ TransitionPlan kiểu "smart-cut-*" dựng Plan + Clock + đường cong gain
+#       (equal power, 8 điểm) + đường send của echo. Bài cũ vào deck TAKEOVER_LEAD_SECONDS=4s trước đoạn chuyển, hai deck chạy rate 1
+#       (không stretch), player bài mới nhận lại sau SETTLE_SECONDS=3s. Từ chối (trả null) nếu đuôi echo vượt file, bài mới còn quá ít, v.v.
+#   - app/.../loopmix/OverlapMixSession.kt: dựng LoopMixSession (plan = null) từ OverlapMix.Plan.
+#   - Vá LoopMixSession (nhận MixTimeline, constructor internal), CrossfadeController (nhánh overlap SAU nhánh loop, TRƯỚC blend;
+#       ba chỗ LoopMix.positionAt đổi sang session.clock.positionAt; nhãn stats; chặn overlap cho cặp đã build lỗi).
+#   - Công tắc: OverlapMix.enabled (input overlap_engine của workflow, MẶC ĐỊNH TẮT). Tắt = mọi thứ chạy y như bước 2.
+#     Điều kiện giống loop mix (loopRefusalFor): 1x, không skip silence, đã phân tích cả hai bài, sink hỗ trợ, v.v. Lỗi build -> về đường cũ.
+#
+# GIỚI HẠN CỦA BƯỚC 3a (đọc kỹ)
+#   - MỚI CHỈ phủ 3 kiểu cắt của bước 2. Blend beatmatch / DJ filter / crossfade thường của planner VẪN chạy 2 player như cũ.
+#     Đó là bước 3b: thêm tempo ramp (knots đã có sẵn trong renderer), EQ bass swap, filter sweep vào OverlapMix rồi chuyển từng loại sang.
+#     Chỉ khi 3b xong mới bỏ được đường 2 player.
+#   - Phần C++ đã biên dịch + chạy test trên máy soạn. Phần Kotlin CHƯA biên dịch (không có kotlinc): workflow chạy test rồi build,
+#     lỗi compile thì tải artifact "build-log" gửi lại.
+#   - CHƯA nghe thử trên máy. Cần kiểm bằng tai: (1) cú splice lúc bài cũ vào deck (logcat "loop splice: deck ... r=" nên r ~ 1),
+#     (2) handover sang player bài mới ("loop align ... left at ... ms" nên < 1.5 ms), (3) echo có flam với bài mới không.
+#   - Ngưỡng mới là ước lượng: TAKEOVER_LEAD 4s, SETTLE 3s, feedback echo 0.5, return 0.8. Cặp nào setup trễ (takeover cách playhead < 6s)
+#     thì bỏ qua overlap và dùng đường cũ.
+#   - Logcat: tag BitChordOverlapMix (dựng deck) và dòng "overlap ..." trong tag của CrossfadeController (verdict từng cặp).
+#
+# CÁCH DÙNG
+#   1. Chép file này vào .github/workflows/step1-next-track-selector.yml rồi commit.
+#   2. Actions -> "Bước 1+2+3 - Chọn bài kế tiếp + kiểu chuyển cắt + engine overlap native (AI DJ)" -> Run workflow.
+#      run_tests: chạy test của selector + repertoire + test planner cũ (nhanh).
+#      echo_cut: bật/tắt ECHO_CUT (mặc định bật; tắt nếu nghe dở).
+#      build_apk: build APK dev benchmark arm64 để nghe thử.
+#      overlap_engine: bật engine overlap native cho các kiểu cắt (bước 3a). Mặc định TẮT; bật để nghe thử, nghe dở thì chạy lại với false.
+#      push_branch: commit lên nhánh feature/next-track-selector (KHÔNG đụng main). Mặc định chỉ build trong bản sao tạm.
+#   3. Muốn thấy nó hoạt động: lọc logcat theo tag BitChordSequencer; dòng "known=x/y top=..." cho biết điểm từng yếu tố.
+#   4. Nếu m sync fork từ upstream: patch dùng thay chuỗi chính xác và DỪNG, báo rõ chỗ nào đổi, không sửa dở.
+# ======================================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: "Chạy test NextTrackSelectorTest trước khi build"
+        type: boolean
+        default: true
+      build_apk:
+        description: "Build APK dev benchmark arm64"
+        type: boolean
+        default: true
+      echo_cut:
+        description: "Bật kiểu ECHO_CUT (echo-out đè lên intro êm). Tắt nếu nghe dở"
+        type: boolean
+        default: true
+      overlap_engine:
+        description: "Bước 3a: render các kiểu cắt bằng renderer native (một clock, echo thật). Mặc định tắt"
+        type: boolean
+        default: false
+      push_branch:
+        description: "Commit lên nhánh feature/next-track-selector (không đụng main)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  step1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ghi các file mới
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname 'shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/NextTrackSelector.kt')"
+          cat > 'shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/NextTrackSelector.kt' <<'KT_EOF'
+          package com.music.bitchord.playback.smart
+
+          import kotlin.math.abs
+          import kotlin.math.ln
+          import kotlin.math.min
+          import kotlin.math.roundToInt
+
+          /**
+           * Picks which song should follow which, the way a DJ builds a set: tempo that
+           * can be matched, a key that does not clash, a similar energy at the join, and
+           * no two sung songs laid over each other.
+           *
+           * Pure: no audio, no players, no I/O. It reads stored [TrackAnalysis] and
+           * returns an order. A candidate with no usable analysis is *unknown*, not bad:
+           * it scores [UNKNOWN_MIX], so tracks nothing has measured yet stay in the order
+           * the radio gave them, and measured ones only move when the evidence is clear.
+           *
+           * The radio's own order is relevance (what YouTube thinks fits the seed), so it
+           * is kept as a gentle tie-breaker: each position down the list costs
+           * [RANK_PENALTY], capped at [MAX_RANK_PENALTY].
+           */
+          object NextTrackSelector {
+
+              const val WEIGHT_TEMPO = 0.40
+              const val WEIGHT_KEY = 0.30
+              const val WEIGHT_ENERGY = 0.15
+              const val WEIGHT_VOCAL = 0.15
+
+              /** What a candidate with no usable analysis scores. */
+              const val UNKNOWN_MIX = 0.5
+
+              /** Score lost per position down the radio's list, up to [MAX_RANK_PENALTY]. */
+              const val RANK_PENALTY = 0.012
+              const val MAX_RANK_PENALTY = 0.3
+
+              const val MIN_KEY_CONFIDENCE = 0.25
+
+              /** Both songs at or above this vocal probability: sung over sung. Same value the planner uses. */
+              const val VOCAL_BOTH_SING = 0.62
+
+              /** How much of the outgoing outro and incoming intro the energy comparison looks at. */
+              const val ENERGY_WINDOW_SECONDS = 30.0
+
+              /** Tempo score kept when either beat grid is below [MIN_BEATMATCH_CONFIDENCE]: no beatmatch, at best DJ-assisted. */
+              private const val UNTRUSTED_GRID_FACTOR = 0.6
+
+              /** A candidate and what is stored about it ([analysis] null or unusable = unknown). */
+              data class Candidate<T>(val item: T, val analysis: TrackAnalysis?)
+
+              class Mix(val value: Double, val detail: String)
+
+              data class Scored<T>(
+                  val item: T,
+                  /** 0..1, how well it follows the previous song; [UNKNOWN_MIX] when not measured. */
+                  val mix: Double,
+                  val known: Boolean,
+                  /** [mix] minus the rank penalty: what the order is sorted by. */
+                  val score: Double,
+                  val detail: String,
+              )
+
+              /**
+               * [candidates] (given in the radio's relevance order) sorted by how well
+               * each follows [previous]. Stable: equal scores keep their given order.
+               * A null or unusable [previous] leaves the order untouched.
+               */
+              fun <T> order(previous: TrackAnalysis?, candidates: List<Candidate<T>>): List<Scored<T>> {
+                  val scored = candidates.mapIndexed { index, candidate ->
+                      val analysis = candidate.analysis
+                      val known = previous != null && previous.isUsable && analysis != null && analysis.isUsable
+                      val mix = if (known) mixOf(previous!!, analysis!!) else Mix(UNKNOWN_MIX, "unknown")
+                      val penalty = min(MAX_RANK_PENALTY, index * RANK_PENALTY)
+                      Scored(candidate.item, mix.value, known, mix.value - penalty, mix.detail)
+                  }
+                  return scored.sortedByDescending { it.score }
+              }
+
+              /**
+               * Greedy chain: the best follower of [previous], then the best follower of
+               * that one, and so on until every candidate is placed. Where the chosen
+               * song is unknown the chain loses its footing and the rest keep radio order.
+               */
+              fun <T> chain(previous: TrackAnalysis?, candidates: List<Candidate<T>>): List<Scored<T>> {
+                  val remaining = candidates.toMutableList()
+                  val result = ArrayList<Scored<T>>(candidates.size)
+                  var current = previous
+                  while (remaining.isNotEmpty()) {
+                      val best = order(current, remaining).first()
+                      val at = remaining.indexOfFirst { it.item === best.item || it.item == best.item }
+                      val taken = remaining.removeAt(at)
+                      result.add(best)
+                      current = taken.analysis?.takeIf { it.isUsable }
+                  }
+                  return result
+              }
+
+              internal fun mixOf(previous: TrackAnalysis, next: TrackAnalysis): Mix {
+                  val names = ArrayList<String>()
+                  val scores = ArrayList<Double>()
+                  val weights = ArrayList<Double>()
+                  fun part(name: String, score: Double?, weight: Double) {
+                      if (score == null) return
+                      names.add(name)
+                      scores.add(score)
+                      weights.add(weight)
+                  }
+                  part("tempo", tempoScore(previous, next), WEIGHT_TEMPO)
+                  part("key", keyScore(trustedKey(previous), trustedKey(next)), WEIGHT_KEY)
+                  part("energy", energyScore(previous, next), WEIGHT_ENERGY)
+                  part("vocal", vocalScore(previous, next), WEIGHT_VOCAL)
+                  var weighted = 0.0
+                  var total = 0.0
+                  for (i in scores.indices) {
+                      weighted += scores[i] * weights[i]
+                      total += weights[i]
+                  }
+                  val value = if (total > 0) weighted / total else UNKNOWN_MIX
+                  val detail = names.indices.joinToString(" ") { "${names[it]}=${(scores[it] * 100).roundToInt()}" }
+                  return Mix(value, detail)
+              }
+
+              /** 1.0 for the same tempo (octave-folded), falling as the stretch needed grows; ~0 beyond the stretch window. */
+              internal fun tempoScore(previous: TrackAnalysis, next: TrackAnalysis): Double? {
+                  val rate = incomingRateBetween(previous.bpm, next.bpm)
+                  if (!rate.isFinite()) return null
+                  val deviation = abs(ln(rate))
+                  val base = when {
+                      deviation <= 0.03 -> 1.0
+                      deviation <= 0.07 -> 0.85
+                      stretchReachable(previous.bpm, next.bpm) -> {
+                          // Slowing a song down is the direction that sounds worse.
+                          val weighted = if (rate < 1.0) deviation * 1.5 else deviation
+                          0.7 - ((weighted - 0.07) / 0.16).coerceIn(0.0, 1.0) * 0.4
+                      }
+                      else -> 0.05
+                  }
+                  val trusted = previous.beatConfidence >= MIN_BEATMATCH_CONFIDENCE &&
+                      next.beatConfidence >= MIN_BEATMATCH_CONFIDENCE
+                  return if (trusted) base else base * UNTRUSTED_GRID_FACTOR
+              }
+
+              private fun trustedKey(analysis: TrackAnalysis): String =
+                  if (analysis.key.isBlank() || analysis.keyConfidence < MIN_KEY_CONFIDENCE) "" else analysis.key
+
+              /**
+               * Distance on the Camelot wheel: the same key and its relative major/minor
+               * are 0 and 1 steps apart, a neighbour on the wheel is 1, a diagonal is 2.
+               * Null when either key is missing or unreadable.
+               */
+              internal fun keyScore(left: String, right: String): Double? {
+                  val a = camelot(left) ?: return null
+                  val b = camelot(right) ?: return null
+                  val around = abs(a.first - b.first)
+                  val steps = min(around, 12 - around) + if (a.second != b.second) 1 else 0
+                  return when (steps) {
+                      0 -> 1.0
+                      1 -> 0.9
+                      2 -> 0.6
+                      3 -> 0.3
+                      else -> 0.1
+                  }
+              }
+
+              private val PITCH = mapOf(
+                  "C" to 0, "C♯" to 1, "D♭" to 1, "D" to 2, "D♯" to 3, "E♭" to 3,
+                  "E" to 4, "F" to 5, "F♯" to 6, "G♭" to 6, "G" to 7, "G♯" to 8,
+                  "A♭" to 8, "A" to 9, "A♯" to 10, "B♭" to 10, "B" to 11,
+              )
+
+              /** Camelot number 1..12 and whether the key is major (B), or null for a key it cannot read. */
+              internal fun camelot(key: String): Pair<Int, Boolean>? {
+                  val parts = key.trim().split(' ').filter { it.isNotEmpty() }
+                  val raw = parts.getOrNull(0)?.replace('#', '♯') ?: return null
+                  val name = if (raw.length == 2 && raw[1] == 'b') raw.substring(0, 1) + "♭" else raw
+                  val pitch = PITCH[name] ?: return null
+                  val mode = parts.getOrNull(1)?.lowercase() ?: return null
+                  val major = when {
+                      mode.startsWith("maj") -> true
+                      mode.startsWith("min") -> false
+                      else -> return null
+                  }
+                  val relativeMajor = if (major) pitch else (pitch + 3) % 12
+                  val number = ((relativeMajor * 7) % 12 + 7) % 12 + 1
+                  return number to major
+              }
+
+              /** How alike the outgoing outro and the incoming intro are in loudness, each against its own song's peak. */
+              internal fun energyScore(previous: TrackAnalysis, next: TrackAnalysis): Double? {
+                  val end = previous.contentEndTime.takeIf { it.isFinite() && it > 0 } ?: previous.duration
+                  val outro = windowLevel(previous.energyCurve, end - ENERGY_WINDOW_SECONDS, end) ?: return null
+                  val start = next.audibleStartTime.orZero()
+                  val intro = windowLevel(next.energyCurve, start, start + ENERGY_WINDOW_SECONDS) ?: return null
+                  return 1.0 - min(1.0, abs(outro - intro) * 1.5)
+              }
+
+              private fun windowLevel(curve: List<EnergySample>, from: Double, to: Double): Double? {
+                  if (curve.size < 4) return null
+                  val peak = curve.maxOf { it.energy }
+                  if (!(peak > 0.0)) return null
+                  val inside = curve.filter { it.time >= from && it.time <= to }
+                  if (inside.isEmpty()) return null
+                  return inside.sumOf { it.energy } / inside.size / peak
+              }
+
+              private fun vocalScore(previous: TrackAnalysis, next: TrackAnalysis): Double =
+                  if (previous.vocalProbability >= VOCAL_BOTH_SING && next.vocalProbability >= VOCAL_BOTH_SING) 0.4 else 1.0
+          }
+          KT_EOF
+          mkdir -p "$(dirname 'shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/NextTrackSelectorTest.kt')"
+          cat > 'shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/NextTrackSelectorTest.kt' <<'KT_EOF'
+          package com.music.bitchord.playback.smart
+
+          import kotlin.test.Test
+          import kotlin.test.assertEquals
+          import kotlin.test.assertNotNull
+          import kotlin.test.assertNull
+          import kotlin.test.assertTrue
+
+          class NextTrackSelectorTest {
+
+              private fun track(
+                  id: String,
+                  bpm: Double,
+                  key: String,
+                  vocal: Double = 0.1,
+                  duration: Double = 200.0,
+                  level: Double = 1.0,
+              ): TrackAnalysis {
+                  val energy = (0 until (duration * 2).toInt()).map { EnergySample(it / 2.0, level) }
+                  return TrackAnalysis(
+                      status = TrackAnalysis.STATUS_READY,
+                      trackId = id,
+                      duration = duration,
+                      bpm = bpm,
+                      beatInterval = 60.0 / bpm,
+                      beatConfidence = 0.9,
+                      key = key,
+                      keyConfidence = 0.9,
+                      audibleStartTime = 0.5,
+                      contentEndTime = duration - 2,
+                      energyCurve = energy,
+                      vocalProbability = vocal,
+                  )
+              }
+
+              private fun cand(id: String, analysis: TrackAnalysis?) = NextTrackSelector.Candidate(id, analysis)
+
+              @Test
+              fun camelotWheelMatchesTheStandardChart() {
+                  assertEquals(8 to false, NextTrackSelector.camelot("A minor"))
+                  assertEquals(8 to true, NextTrackSelector.camelot("C major"))
+                  assertEquals(9 to true, NextTrackSelector.camelot("G major"))
+                  assertEquals(7 to false, NextTrackSelector.camelot("D minor"))
+                  assertEquals(1 to true, NextTrackSelector.camelot("B major"))
+                  assertEquals(5 to false, NextTrackSelector.camelot("C minor"))
+                  assertEquals(NextTrackSelector.camelot("A♭ major"), NextTrackSelector.camelot("Ab major"))
+                  assertEquals(NextTrackSelector.camelot("C♯ minor"), NextTrackSelector.camelot("C# minor"))
+                  assertNull(NextTrackSelector.camelot(""))
+                  assertNull(NextTrackSelector.camelot("H major"))
+              }
+
+              @Test
+              fun relativeMajorAndMinorAreClose() {
+                  assertEquals(1.0, NextTrackSelector.keyScore("C major", "C major"))
+                  assertEquals(0.9, NextTrackSelector.keyScore("C major", "A minor"))
+                  assertEquals(0.9, NextTrackSelector.keyScore("C major", "G major"))
+                  assertTrue(NextTrackSelector.keyScore("C major", "F♯ major")!! <= 0.1 + 1e-9)
+                  assertNull(NextTrackSelector.keyScore("", "C major"))
+              }
+
+              @Test
+              fun tempoFoldsOctavesAndRejectsFarPairs() {
+                  val base = track("a", 120.0, "C major")
+                  assertEquals(1.0, NextTrackSelector.tempoScore(base, track("b", 121.0, "C major"))!!, 1e-9)
+                  assertEquals(1.0, NextTrackSelector.tempoScore(base, track("b", 60.0, "C major"))!!, 1e-9)
+                  assertEquals(0.05, NextTrackSelector.tempoScore(base, track("b", 175.0, "C major"))!!, 1e-9)
+                  val mid = NextTrackSelector.tempoScore(base, track("b", 130.0, "C major"))!!
+                  assertTrue(mid > 0.3 && mid < 0.7)
+              }
+
+              @Test
+              fun anUntrustedGridCostsTempoScore() {
+                  val a = track("a", 120.0, "C major")
+                  val b = track("b", 120.0, "C major").copy(beatConfidence = 0.2)
+                  assertEquals(0.6, NextTrackSelector.tempoScore(a, b)!!, 1e-9)
+              }
+
+              @Test
+              fun aPerfectFollowerScoresOne() {
+                  val a = track("a", 120.0, "C major")
+                  val b = track("b", 120.0, "C major")
+                  assertEquals(1.0, NextTrackSelector.mixOf(a, b).value, 1e-9)
+              }
+
+              @Test
+              fun twoSungSongsScoreLowerThanSungThenInstrumental() {
+                  val a = track("a", 120.0, "C major", vocal = 0.9)
+                  val sung = track("b", 120.0, "C major", vocal = 0.9)
+                  val quiet = track("c", 120.0, "C major", vocal = 0.1)
+                  assertTrue(NextTrackSelector.mixOf(a, sung).value < NextTrackSelector.mixOf(a, quiet).value)
+              }
+
+              @Test
+              fun withNoEvidenceTheRadioOrderIsKept() {
+                  val prev = track("p", 120.0, "C major")
+                  val ids = listOf("a", "b", "c", "d")
+                  val out = NextTrackSelector.order(prev, ids.map { cand(it, null) })
+                  assertEquals(ids, out.map { it.item })
+                  assertTrue(out.none { it.known })
+                  val noPrev = NextTrackSelector.order(null, ids.map { cand(it, track(it, 120.0, "C major")) })
+                  assertEquals(ids, noPrev.map { it.item })
+              }
+
+              @Test
+              fun aGoodMeasuredFollowerJumpsAheadOfUnknowns() {
+                  val prev = track("p", 120.0, "C major")
+                  val list = listOf(
+                      cand("u1", null), cand("u2", null), cand("u3", null),
+                      cand("good", track("good", 121.0, "A minor")),
+                  )
+                  assertEquals("good", NextTrackSelector.order(prev, list).first().item)
+              }
+
+              @Test
+              fun aMeasuredClashFallsBehindUnknowns() {
+                  val prev = track("p", 120.0, "C major")
+                  val list = listOf(
+                      cand("bad", track("bad", 175.0, "F♯ major", vocal = 0.9)),
+                      cand("u1", null),
+                      cand("u2", null),
+                  )
+                  val out = NextTrackSelector.order(prev, list).map { it.item }
+                  assertEquals("bad", out.last())
+              }
+
+              @Test
+              fun chainIsAPermutationAndFollowsTheBestMatch() {
+                  val prev = track("p", 120.0, "C major")
+                  val list = listOf(
+                      cand("far", track("far", 175.0, "F♯ major")),
+                      cand("near", track("near", 122.0, "G major")),
+                      cand("unknown", null),
+                  )
+                  val out = NextTrackSelector.chain(prev, list)
+                  assertEquals(setOf("far", "near", "unknown"), out.map { it.item }.toSet())
+                  assertEquals(3, out.size)
+                  assertEquals("near", out.first().item)
+                  assertNotNull(out.first().detail)
+              }
+          }
+          KT_EOF
+          mkdir -p "$(dirname 'app/src/main/java/com/music/bitchord/playback/AutoplaySequencer.kt')"
+          cat > 'app/src/main/java/com/music/bitchord/playback/AutoplaySequencer.kt' <<'KT_EOF'
+          package com.music.bitchord.playback
+
+          import android.util.Log
+          import com.music.bitchord.data.model.Song
+          import com.music.bitchord.playback.smart.NextTrackSelector
+          import com.music.bitchord.playback.smart.TrackAnalysis
+          import kotlinx.coroutines.CancellationException
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
+
+          /**
+           * Orders an AutoPlay batch so each song follows the last one the way a DJ
+           * would: matching tempo, compatible key, similar energy at the join.
+           *
+           * It only reads analysis that already exists (the playing track's, and any
+           * candidate analysed in an earlier session). A candidate nothing has measured
+           * is left where the radio put it, so with no evidence this is a no-op and
+           * never makes the queue worse. It never starts an analysis.
+           *
+           * The playback service installs [analysisLookup]; until then, and after the
+           * service is destroyed, [sequence] returns the radio's order untouched.
+           */
+          object AutoplaySequencer {
+
+              private const val TAG = "BitChordSequencer"
+
+              /** Stored analysis for a track id (the queue item's media id), or null when there is none. Blocking; called off the main thread. */
+              @Volatile
+              var analysisLookup: ((String) -> TrackAnalysis?)? = null
+
+              /** Master switch. No settings UI yet: flip here to turn the whole feature off. */
+              @Volatile
+              var enabled: Boolean = true
+
+              /**
+               * [candidates] reordered to follow [after] (the track the new songs will be
+               * queued behind). Returns [candidates] unchanged when there is nothing to
+               * go on or anything goes wrong.
+               */
+              suspend fun sequence(after: Song, candidates: List<Song>): List<Song> {
+                  val lookup = analysisLookup
+                  if (!enabled || lookup == null || candidates.size < 2) return candidates
+                  return try {
+                      withContext(Dispatchers.IO) {
+                          val previous = lookup(after.videoId)?.takeIf { it.isUsable }
+                              ?: return@withContext candidates
+                          val scored = NextTrackSelector.chain(
+                              previous,
+                              candidates.map { NextTrackSelector.Candidate(it, lookup(it.videoId)) },
+                          )
+                          val known = scored.count { it.known }
+                          if (known > 0) {
+                              Log.i(
+                                  TAG,
+                                  "after=${after.videoId} known=$known/${scored.size} top=" +
+                                      scored.take(3).joinToString { "${it.item.videoId}(${it.detail})" },
+                              )
+                          }
+                          scored.map { it.item }
+                      }
+                  } catch (cancelled: CancellationException) {
+                      throw cancelled
+                  } catch (failure: Exception) {
+                      Log.w(TAG, "sequencing failed, keeping radio order: ${failure.message}")
+                      candidates
+                  }
+              }
+          }
+          KT_EOF
+          mkdir -p "$(dirname '.github/step1-patch.py')"
+          cat > '.github/step1-patch.py' <<'PY_EOF'
+          #!/usr/bin/env python3
+          """Gắn bộ chọn bài vào Autoplay.kt và PlaybackService.kt bằng cách thay đúng chuỗi.
+          Nếu một chuỗi gốc không còn (hoặc xuất hiện nhiều lần) thì DỪNG và báo rõ, không sửa dở."""
+          import pathlib, sys
+
+          BASE = pathlib.Path("app/src/main/java/com/music/bitchord/playback")
+
+          def patch(path, edits):
+              text = path.read_text(encoding="utf-8")
+              for label, old, new in edits:
+                  if new in text:
+                      print(f"[bỏ qua] {path.name}: {label} (đã có)")
+                      continue
+                  n = text.count(old)
+                  if n != 1:
+                      sys.exit(f"LỖI: {path.name}: '{label}' tìm thấy {n} chỗ (cần đúng 1). Code gốc đã đổi, cần chỉnh lại patch.")
+                  text = text.replace(old, new)
+                  print(f"[ok] {path.name}: {label}")
+              path.write_text(text, encoding="utf-8")
+
+          patch(BASE / "Autoplay.kt", [
+              ("tham số after",
+               "    limit: Int = MAX_QUEUED_AUTOPLAY,\n): Result<List<Song>> {",
+               "    limit: Int = MAX_QUEUED_AUTOPLAY,\n    /** The track the new songs will be queued behind, when that is not [seedSong]. */\n    after: Song? = null,\n): Result<List<Song>> {"),
+              ("sắp xếp trước khi extend",
+               "    val extra = QueueBuilder.extend(existing, related, limit, preferVideos = videos)",
+               "    val sequenced = AutoplaySequencer.sequence(after ?: seedSong, related)\n    val extra = QueueBuilder.extend(existing, sequenced, limit, preferVideos = videos)"),
+          ])
+
+          patch(BASE / "PlaybackService.kt", [
+              ("cài lookup analysis",
+               "    private val trackAnalyzer = com.music.bitchord.playback.smart.TrackAnalyzer(this, AudioCache)\n",
+               "    private val trackAnalyzer = com.music.bitchord.playback.smart.TrackAnalyzer(this, AudioCache)\n\n"
+               "    /** Read-only view of the analyses already on disk, for AutoPlay's next-track ordering. */\n"
+               "    private val sequencerStore = com.music.bitchord.playback.smart.AnalysisStore { filesDir }\n\n"
+               "    init {\n"
+               "        AutoplaySequencer.analysisLookup = { id ->\n"
+               "            trackAnalyzer.analysisFor(id).takeIf { it.isUsable } ?: sequencerStore.load(id)?.takeIf { it.isUsable }\n"
+               "        }\n"
+               "    }\n"),
+              ("gỡ lookup khi huỷ service",
+               "        trackAnalyzer.release()\n",
+               "        AutoplaySequencer.analysisLookup = null\n        trackAnalyzer.release()\n"),
+              ("truyền bài cuối hàng đợi",
+               "                val result = loadAutoplayTracks(existing, seedSong, remaining)\n",
+               "                val result = loadAutoplayTracks(existing, seedSong, remaining, after = queueSongs.lastOrNull())\n"),
+          ])
+          PY_EOF
+
+          mkdir -p "$(dirname 'shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/TransitionRepertoire.kt')"
+          cat > 'shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/TransitionRepertoire.kt' <<'KT_EOF'
+          package com.music.bitchord.playback.smart
+
+          import kotlin.math.abs
+          import kotlin.math.max
+          import kotlin.math.min
+
+          /**
+           * The extra gestures a pair that cannot be beatmatched can get instead of a
+           * plain crossfade. Each is a short, downbeat-aligned move a DJ would make
+           * when two songs will not share a grid.
+           */
+          enum class CutGesture(val reason: String) {
+              /** Leave on an outgoing downbeat, arrive on an incoming downbeat. Loud into loud. */
+              QUICK_CUT("smart-cut-quick"),
+
+              /** Same cut, but the incoming song is cued at its drop instead of its intro. */
+              DROP_CUT("smart-cut-drop"),
+
+              /** The outgoing song echoes out over a quiet incoming intro. */
+              ECHO_CUT("smart-cut-echo"),
+          }
+
+          /**
+           * Picks and plans a [CutGesture] for a pair the planner has already judged
+           * unmixable (tempo out of reach, plus a key clash or two singers).
+           *
+           * Pure: reads two [TrackAnalysis] values and returns a [TransitionPlan], or
+           * null when the evidence does not support a cut — in which case the caller
+           * keeps its plain crossfade. Only used with Advanced Automix on.
+           *
+           * Every plan reuses fields the renderer already understands (EQUAL_POWER with
+           * a short fade; the existing echo-out when [TransitionPlan.echoSeconds] is
+           * set), so no renderer change is needed.
+           */
+          object TransitionRepertoire {
+              /** Master switch. False gives back the plain crossfade for every unmixable pair. */
+              var enabled: Boolean = true
+
+              /**
+               * The echo-out gesture on its own. Echo-out was switched off in the planner once because
+               * repeats at the outgoing tempo flam over an incoming track at another one; this only plans
+               * it over a quiet incoming intro, but it is the gesture to judge by ear first.
+               */
+              var echoCutEnabled: Boolean = true
+
+              /** Length of a cut's fade. Short enough to read as a cut, long enough not to click. */
+              const val CUT_FADE_SECONDS = 0.5
+
+              /** How far before the real end of the outgoing song a cut may leave. */
+              private const val MAX_EXIT_SEARCH_SECONDS = 20.0
+
+              /** A phrase boundary is preferred over the last downbeat when it is within this many beats of it. */
+              private const val PHRASE_SLACK_BEATS = 16.0
+
+              private const val MIN_DOWNBEATS = 8
+
+              /** Seconds of music compared either side of a join when judging energy. */
+              private const val ENERGY_WINDOW_SECONDS = 4.0
+
+              /** Energy, against the track's own mean, at or above which a passage counts as loud. */
+              private const val LOUD = 0.6
+
+              /** Energy, against the track's own mean, below which an intro counts as quiet. */
+              private const val QUIET = 0.55
+
+              /** How much louder the window after a point must be than the one before it to count as a drop. */
+              private const val DROP_STEP = 1.5
+
+              /** A drop closer than this to the intro start is just the intro. */
+              private const val MIN_DROP_DISTANCE_SECONDS = 4.0
+
+              /** Both tracks at or above this whole-track vocal likelihood count as two singers. */
+              private const val BOTH_SING = 0.5
+
+              /** The echo-out overlap, in outgoing beats. Eight is what the renderer's dry-kill is sized for. */
+              private const val ECHO_CUT_BEATS = 8
+
+              /** Music that must remain in the incoming file after an echo-out overlap. */
+              private const val INCOMING_CLEARANCE_SECONDS = 8.0
+
+              fun plan(
+                  analysis: TrackAnalysis,
+                  nextAnalysis: TrackAnalysis,
+                  length: Double,
+                  nextLength: Double,
+                  finalMixAnchor: Double,
+                  advanced: Boolean,
+              ): TransitionPlan? {
+                  if (!enabled || !advanced) return null
+                  if (length <= 0.0 || nextLength <= 0.0) return null
+
+                  // A cut on the downbeat is only as good as the outgoing downbeat grid.
+                  val beat = beatSecondsOf(analysis)
+                  if (beat <= 0.0) return null
+                  if (analysis.beatConfidence.orZero() < MIN_DJ_CONFIDENCE) return null
+                  if (analysis.downbeats.size < MIN_DOWNBEATS) return null
+
+                  val lowest = max(0.0, finalMixAnchor - MAX_EXIT_SEARCH_SECONDS)
+                  val highest = finalMixAnchor - CUT_FADE_SECONDS
+                  val exit = cutExit(analysis, beat, lowest, highest) ?: return null
+                  if (exit < CUT_FADE_SECONDS) return null
+
+                  // Where the incoming song arrives: its first downbeat once it makes sound.
+                  val nextBeat = beatSecondsOf(nextAnalysis)
+                  val nextGrid = nextBeat > 0.0 && nextAnalysis.beatConfidence.orZero() >= MIN_DJ_CONFIDENCE
+                  val floor = max(audibleStartOf(nextAnalysis), CUT_FADE_SECONDS)
+                  val entry = (if (nextGrid) nextAnalysis.downbeats.firstOrNull { it >= floor - 0.05 } else null) ?: floor
+
+                  // Unknown energy is not evidence of anything: no cut on a guess.
+                  val outLevel = relativeEnergy(analysis.energyCurve, exit - ENERGY_WINDOW_SECONDS, exit) ?: return null
+                  val entryLevel = relativeEnergy(nextAnalysis.energyCurve, entry, entry + ENERGY_WINDOW_SECONDS)
+                      ?: return null
+
+                  val bothSing = analysis.vocalProbability >= BOTH_SING && nextAnalysis.vocalProbability >= BOTH_SING
+
+                  if (echoCutEnabled && !bothSing && outLevel >= LOUD && entryLevel < QUIET) {
+                      echoPlan(analysis, beat, length, nextLength, lowest, highest, entry)?.let { return it }
+                  }
+                  if (outLevel < LOUD) return null
+
+                  val latest = latestIncomingCue(nextLength)
+                  val dropRaw = incomingCuePoint(nextAnalysis, latest)
+                  val drop = nextAnalysis.downbeats
+                      .filter { abs(it - dropRaw) <= max(0.5, 2 * nextBeat) }
+                      .minByOrNull { abs(it - dropRaw) } ?: dropRaw
+                  if (isDrop(nextAnalysis, entry, drop, latest)) {
+                      return cut(CutGesture.DROP_CUT, exit, cue = drop - CUT_FADE_SECONDS, handoff = drop)
+                  }
+                  if (entryLevel >= LOUD) {
+                      return cut(CutGesture.QUICK_CUT, exit, cue = entry - CUT_FADE_SECONDS, handoff = entry)
+                  }
+                  return null
+              }
+
+              private fun beatSecondsOf(analysis: TrackAnalysis): Double {
+                  val interval = analysis.beatInterval.orZero()
+                  if (interval > 0.0) return interval
+                  val bpm = analysis.bpm.orZero()
+                  return if (bpm > 0.0) 60.0 / bpm else 0.0
+              }
+
+              /** The last downbeat before the end, pulled back to a phrase boundary when one is close. */
+              private fun cutExit(analysis: TrackAnalysis, beat: Double, lowest: Double, highest: Double): Double? {
+                  val downbeat = analysis.downbeats.filter { it in lowest..highest }.maxOrNull() ?: return null
+                  val phrase = analysis.phraseBoundaries.filter { it in lowest..highest }.maxOrNull()
+                  return if (phrase != null && downbeat - phrase <= PHRASE_SLACK_BEATS * beat) phrase else downbeat
+              }
+
+              private fun isDrop(next: TrackAnalysis, entry: Double, drop: Double, latest: Double): Boolean {
+                  if (drop - entry < MIN_DROP_DISTANCE_SECONDS || drop > latest) return false
+                  val curve = next.energyCurve
+                  val before = windowEnergy(curve, drop - ENERGY_WINDOW_SECONDS, drop) ?: return false
+                  val after = windowEnergy(curve, drop, drop + ENERGY_WINDOW_SECONDS) ?: return false
+                  if (before <= 0.0 || after / before < DROP_STEP) return false
+                  val level = relativeEnergy(curve, drop, drop + ENERGY_WINDOW_SECONDS) ?: return false
+                  return level >= LOUD
+              }
+
+              /** A cut: a [CUT_FADE_SECONDS] equal-power fade ending on [exit], with the incoming downbeat landing on it. */
+              private fun cut(gesture: CutGesture, exit: Double, cue: Double, handoff: Double): TransitionPlan =
+                  TransitionPlan(
+                      markerVisible = true,
+                      transitionStart = exit - CUT_FADE_SECONDS,
+                      transitionEnd = exit,
+                      fadeSeconds = CUT_FADE_SECONDS,
+                      transitionStyle = TransitionStyle.EQUAL_POWER,
+                      incomingCueTime = max(0.0, cue),
+                      incomingHandoffTime = handoff,
+                      reason = gesture.reason,
+                  )
+
+              /**
+               * An echo-out: [ECHO_CUT_BEATS] outgoing beats of overlap over the incoming intro, ending on a
+               * downbeat that leaves room in the outgoing file for the repeats to ring (the renderer
+               * generates them from the outgoing audio, which dies with the file).
+               */
+              private fun echoPlan(
+                  analysis: TrackAnalysis,
+                  beat: Double,
+                  length: Double,
+                  nextLength: Double,
+                  lowest: Double,
+                  highest: Double,
+                  entry: Double,
+              ): TransitionPlan? {
+                  val echoSeconds = min(beat, MAX_ECHO_SECONDS)
+                  val tail = echoTailSeconds(echoSeconds)
+                  val overlap = ECHO_CUT_BEATS * beat
+                  val exit = analysis.downbeats
+                      .filter { it in lowest..highest && length - it >= tail && it - overlap >= 0.0 }
+                      .maxOrNull() ?: return null
+                  if (entry + overlap > nextLength - INCOMING_CLEARANCE_SECONDS) return null
+                  return TransitionPlan(
+                      markerVisible = true,
+                      transitionStart = exit - overlap,
+                      transitionEnd = exit,
+                      fadeSeconds = overlap,
+                      transitionStyle = TransitionStyle.EQUAL_POWER,
+                      incomingCueTime = entry,
+                      incomingHandoffTime = entry + overlap,
+                      beatSeconds = beat,
+                      echoSeconds = echoSeconds,
+                      reason = CutGesture.ECHO_CUT.reason,
+                  )
+              }
+
+              private fun windowEnergy(curve: List<EnergySample>, from: Double, until: Double): Double? {
+                  val inside = curve.filter { it.energy.isFinite() && it.time >= from && it.time < until }
+                  if (inside.isEmpty()) return null
+                  return inside.sumOf { it.energy } / inside.size
+              }
+
+              /** Mean energy over the window, against the track's own mean over its whole curve. */
+              private fun relativeEnergy(curve: List<EnergySample>, from: Double, until: Double): Double? {
+                  val finite = curve.filter { it.energy.isFinite() }
+                  if (finite.isEmpty()) return null
+                  val reference = finite.sumOf { it.energy } / finite.size
+                  if (reference <= 0.0) return null
+                  val window = windowEnergy(curve, from, until) ?: return null
+                  return window / reference
+              }
+          }
+          KT_EOF
+
+          cat > 'shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/TransitionRepertoireTest.kt' <<'KT_EOF'
+          package com.music.bitchord.playback.smart
+
+          import kotlin.math.abs
+          import kotlin.test.Test
+          import kotlin.test.assertEquals
+          import kotlin.test.assertNotNull
+          import kotlin.test.assertNull
+          import kotlin.test.assertTrue
+
+          class TransitionRepertoireTest {
+
+              /** A synthetic, fully analysed track on a steady grid, with a shaped energy curve. */
+              private fun track(
+                  id: String,
+                  bpm: Double,
+                  key: String,
+                  vocal: Double,
+                  duration: Double = 200.0,
+                  energy: (Double) -> Double = { 1.0 },
+              ): TrackAnalysis {
+                  val beat = 60.0 / bpm
+                  val downbeats = generateSequence(0.5) { it + 4 * beat }.takeWhile { it < duration - 1 }.toList()
+                  val curve = (0 until (duration * 2).toInt()).map { EnergySample(it / 2.0, energy(it / 2.0)) }
+                  return TrackAnalysis(
+                      status = TrackAnalysis.STATUS_READY,
+                      trackId = id,
+                      duration = duration,
+                      bpm = bpm,
+                      beatInterval = beat,
+                      beatConfidence = 0.9,
+                      downbeats = downbeats,
+                      phraseBoundaries = downbeats.filterIndexed { index, _ -> index % 8 == 0 },
+                      firstBeat = 0.5,
+                      key = key,
+                      keyConfidence = 0.9,
+                      audibleStartTime = 0.5,
+                      contentEndTime = duration - 2,
+                      mixInTime = downbeats[4],
+                      energyCurve = curve,
+                      vocalProbability = vocal,
+                  )
+              }
+
+              private fun cutPlan(
+                  current: TrackAnalysis,
+                  next: TrackAnalysis,
+                  advanced: Boolean = true,
+              ): TransitionPlan? = TransitionRepertoire.plan(
+                  analysis = current,
+                  nextAnalysis = next,
+                  length = current.duration,
+                  nextLength = next.duration,
+                  finalMixAnchor = current.contentEndTime,
+                  advanced = advanced,
+              )
+
+              private fun onGrid(downbeats: List<Double>, time: Double) = downbeats.any { abs(it - time) < 1e-6 }
+
+              @Test
+              fun loudIntoLoudIsCutOnTheDownbeats() {
+                  val current = track("a", 120.0, "C major", vocal = 0.9)
+                  val next = track("b", 94.0, "F♯ major", vocal = 0.9)
+                  val plan = assertNotNull(cutPlan(current, next))
+                  assertEquals("smart-cut-quick", plan.reason)
+                  assertEquals(TransitionStyle.EQUAL_POWER, plan.transitionStyle)
+                  assertTrue(plan.fadeSeconds <= 0.5 + 1e-6, "a cut is short: ${plan.fadeSeconds}s")
+                  assertTrue(onGrid(current.downbeats, plan.transitionEnd), "leaves on an outgoing downbeat")
+                  assertTrue(
+                      onGrid(next.downbeats, plan.incomingCueTime + plan.fadeSeconds),
+                      "the incoming downbeat lands on the exit",
+                  )
+                  assertEquals(0.0, plan.echoSeconds)
+              }
+
+              @Test
+              fun aQuietIntroGetsAnEchoOut() {
+                  val current = track("a", 120.0, "C major", vocal = 0.1)
+                  val next = track("b", 94.0, "C major", vocal = 0.1) { if (it < 12.0) 0.2 else 1.0 }
+                  val plan = assertNotNull(cutPlan(current, next))
+                  assertEquals("smart-cut-echo", plan.reason)
+                  assertEquals(0.5, plan.echoSeconds, 1e-6)
+                  assertEquals(0.5, plan.beatSeconds, 1e-6)
+                  assertEquals(4.0, plan.fadeSeconds, 1e-6)
+                  assertTrue(onGrid(current.downbeats, plan.transitionEnd))
+                  assertTrue(
+                      current.duration - plan.transitionEnd >= echoTailSeconds(plan.echoSeconds),
+                      "the repeats need outgoing file to ring in",
+                  )
+              }
+
+              @Test
+              fun theEchoNeedsAdvancedAndHonoursItsSwitch() {
+                  val current = track("a", 120.0, "C major", vocal = 0.1)
+                  val next = track("b", 94.0, "C major", vocal = 0.1) { if (it < 12.0) 0.2 else 1.0 }
+                  assertNull(cutPlan(current, next, advanced = false))
+                  TransitionRepertoire.echoCutEnabled = false
+                  try {
+                      assertEquals(0.0, cutPlan(current, next)?.echoSeconds ?: 0.0)
+                  } finally {
+                      TransitionRepertoire.echoCutEnabled = true
+                  }
+              }
+
+              @Test
+              fun twoSingersAreNeverEchoed() {
+                  val current = track("a", 120.0, "C major", vocal = 0.9)
+                  val next = track("b", 94.0, "C major", vocal = 0.9) { if (it < 12.0) 0.2 else 1.0 }
+                  assertEquals(0.0, cutPlan(current, next)?.echoSeconds ?: 0.0)
+              }
+
+              @Test
+              fun aDropIsCutTo() {
+                  val current = track("a", 120.0, "C major", vocal = 0.9)
+                  val grid = track("b", 94.0, "F♯ major", vocal = 0.9)
+                  val dropAt = grid.downbeats[8]
+                  // The energy step must sit exactly on the drop, or there is no drop to cut to.
+                  val base = track("b", 94.0, "F♯ major", vocal = 0.9) { if (it < dropAt) 0.3 else 1.0 }
+                  val next = base.copy(
+                      mixInTime = dropAt,
+                      mixInCandidates = listOf(MixCandidate(dropAt, 1.0, "main_drop")),
+                  )
+                  val plan = assertNotNull(cutPlan(current, next))
+                  assertEquals("smart-cut-drop", plan.reason)
+                  assertEquals(dropAt, plan.incomingCueTime + plan.fadeSeconds, 1e-6)
+                  assertTrue(plan.incomingHandoffTime <= 0.25 * next.duration + 1e-6)
+              }
+
+              @Test
+              fun aQuietOutgoingEndIsLeftToTheCrossfade() {
+                  val current = track("a", 120.0, "C major", vocal = 0.9) { if (it < 150.0) 1.0 else 0.2 }
+                  val next = track("b", 94.0, "F♯ major", vocal = 0.9)
+                  assertNull(cutPlan(current, next))
+              }
+
+              @Test
+              fun withoutAReliableGridNothingIsCut() {
+                  val current = track("a", 120.0, "C major", vocal = 0.9).copy(beatConfidence = 0.1)
+                  val next = track("b", 94.0, "F♯ major", vocal = 0.9)
+                  assertNull(cutPlan(current, next))
+              }
+
+              // The planner end to end: the same unmixable pair, with and without the repertoire.
+
+              private fun planned(current: TrackAnalysis, next: TrackAnalysis, advanced: Boolean) = planTransition(
+                  analysis = current,
+                  nextAnalysis = next,
+                  currentTrack = TransitionTrackInfo(current.trackId, (current.duration * 1000).toLong()),
+                  nextTrack = TransitionTrackInfo(next.trackId, (next.duration * 1000).toLong()),
+                  currentTime = 10.0,
+                  duration = current.duration,
+                  mode = CrossfadeMode.SMART,
+                  advanced = advanced,
+              )
+
+              @Test
+              fun thePlannerCutsAnUnmixablePairOnlyInAdvancedMode() {
+                  val current = track("a", 120.0, "C major", vocal = 0.9)
+                  val next = track("b", 94.0, "F♯ major", vocal = 0.9)
+
+                  val advanced = planned(current, next, advanced = true)
+                  assertTrue(advanced.reason.contains("smart-cut"), "advanced: ${advanced.reason}")
+                  assertTrue("unmixable-pair" in advanced.policyReasons)
+
+                  val classic = planned(current, next, advanced = false)
+                  assertEquals("before-unmixable-crossfade", classic.reason)
+                  assertEquals(current.contentEndTime, classic.transitionEnd, 1e-6)
+
+                  TransitionRepertoire.enabled = false
+                  try {
+                      assertEquals("before-unmixable-crossfade", planned(current, next, advanced = true).reason)
+                  } finally {
+                      TransitionRepertoire.enabled = true
+                  }
+              }
+          }
+          KT_EOF
+
+          cat > '.github/step2-patch.py' <<'PY_EOF'
+          #!/usr/bin/env python3
+          """Gắn TransitionRepertoire vào TransitionPlanner.kt, nhãn UI trong CrossfadeController.kt,
+          và chỉnh test cũ AdvancedAutomixPlannerTest (nó ghim hành vi crossfade phẳng của cặp unmixable).
+          Nếu một chuỗi gốc không còn (hoặc xuất hiện nhiều lần) thì DỪNG và báo rõ, không sửa dở."""
+          import pathlib, sys
+
+          def patch(path, edits):
+              text = path.read_text(encoding="utf-8")
+              for label, old, new in edits:
+                  if new in text:
+                      print(f"[bỏ qua] {path.name}: {label} (đã có)")
+                      continue
+                  n = text.count(old)
+                  if n != 1:
+                      sys.exit(f"LỖI: {path.name}: '{label}' tìm thấy {n} chỗ (cần đúng 1). Code gốc đã đổi, cần chỉnh lại patch.")
+                  text = text.replace(old, new)
+                  print(f"[ok] {path.name}: {label}")
+              path.write_text(text, encoding="utf-8")
+
+          SMART = pathlib.Path("shared/src/commonMain/kotlin/com/music/bitchord/playback/smart")
+          TEST = pathlib.Path("shared/src/commonTest/kotlin/com/music/bitchord/playback/smart")
+          APP = pathlib.Path("app/src/main/java/com/music/bitchord/playback")
+
+          patch(SMART / "TransitionPlanner.kt", [
+              ("cắt thay cho crossfade phẳng ở cặp unmixable",
+               r'''    if (isUnmixablePair(analysis, nextAnalysis)) {
+          ''',
+               r'''    if (isUnmixablePair(analysis, nextAnalysis)) {
+                  // Advanced Automix: a downbeat cut / cut to the drop / echo-out beats two loud
+                  // unsynced songs laid over each other. Null means "no evidence", and the plain
+                  // crossfade below runs exactly as before.
+                  TransitionRepertoire.plan(
+                      analysis = analysis,
+                      nextAnalysis = nextAnalysis,
+                      length = length,
+                      nextLength = nextLength,
+                      finalMixAnchor = finalMixAnchor,
+                      advanced = advanced,
+                  )?.takeIf { playbackTime < it.transitionEnd - 0.05 }?.let { cut ->
+                      val started = playbackTime >= cut.transitionStart
+                      return cut.copy(
+                          shouldStart = started,
+                          policyReasons = policy.reasons + "unmixable-pair",
+                          reason = if (started) cut.reason else "before-${cut.reason}",
+                      )
+                  }
+          '''),
+          ])
+
+          patch(APP / "CrossfadeController.kt", [
+              ("nhãn UI cho kiểu cắt",
+               r'''TransitionStyle.EQUAL_POWER -> "Automix · crossfading $whenText''',
+               r'''TransitionStyle.EQUAL_POWER -> if (plan.reason.contains("-cut-")) "Automix · cut mix $whenText · ${plan.reason.substringAfterLast("-")}$noLoop" else "Automix · crossfading $whenText'''),
+          ])
+
+          patch(TEST / "AdvancedAutomixPlannerTest.kt", [
+              ("test unmixable chạy với repertoire tắt",
+               r'''        val plan = plan(current, next, advanced = true)
+                  assertEquals(TransitionStyle.EQUAL_POWER, plan.transitionStyle)
+                  assertEquals(current.contentEndTime, plan.transitionEnd, 1e-6)''',
+               r'''        // The cut repertoire (TransitionRepertoireTest) is switched off here: this pins the
+                  // plain crossfade it falls back to when it has no evidence.
+                  TransitionRepertoire.enabled = false
+                  val plan = try {
+                      plan(current, next, advanced = true)
+                  } finally {
+                      TransitionRepertoire.enabled = true
+                  }
+                  assertEquals(TransitionStyle.EQUAL_POWER, plan.transitionStyle)
+                  assertEquals(current.contentEndTime, plan.transitionEnd, 1e-6)'''),
+          ])
+          PY_EOF
+
+      - name: Vá Autoplay.kt và PlaybackService.kt
+        run: python3 .github/step1-patch.py
+
+      - name: Vá TransitionPlanner, nhãn UI và test cũ (bước 2)
+        run: python3 .github/step2-patch.py
+
+      - name: Đặt công tắc ECHO_CUT
+        shell: bash
+        run: |
+          set -euo pipefail
+          F='shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/TransitionRepertoire.kt'
+          sed -i "s/var echoCutEnabled: Boolean = true/var echoCutEnabled: Boolean = ${{ inputs.echo_cut }}/" "$F"
+          grep -n "var echoCutEnabled" "$F"
+
+      - name: Ghi các file bước 3 (engine overlap native)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname 'shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/MixTimeline.kt')"
+          cat > 'shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/MixTimeline.kt' <<'KT_EOF'
+          package com.music.bitchord.playback.smart
+
+          /**
+           * What the sink-side renderer's mix looks like to everything that is not the
+           * renderer: the controller (when to start the incoming player, when the app
+           * moves to the new song, where the scrubber is) and the session (where the
+           * outgoing sink takes over). Both [LoopMix.Clock] and [OverlapMix.Clock] are one,
+           * so one controller path can run either kind of mix.
+           *
+           * Every time is mix seconds, 0 being the moment the outgoing song reaches
+           * [takeoverSeconds] and the sink crosses over to the renderer.
+           */
+          interface MixTimeline {
+              /** Track second of the outgoing song at mix t0: where the sink splices. */
+              val takeoverSeconds: Double
+
+              /** Beat k of the mix, seconds after t0; at least two entries. Drives the scrubber's pulse only. */
+              val beatTimes: DoubleArray
+
+              /** The app moves to the incoming song here. */
+              val handoffAt: Double
+
+              /** The outgoing deck is done being the main sound here. */
+              val releaseAt: Double
+
+              /** The incoming player takes over here, at track second [elementTrackTime]. */
+              val elementAt: Double
+              val elementTrackTime: Double
+
+              /** The beat [t] falls in and how far through it (0..1); k = -1 before t0. */
+              fun beatAt(t: Double): Pair<Int, Double>
+
+              /** Where [side]'s song is [t] seconds after t0, or null where it isn't sounding from a deck. */
+              fun positionAt(side: LoopMix.Side, t: Double): Double?
+          }
+          KT_EOF
+          mkdir -p "$(dirname 'shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/OverlapMix.kt')"
+          cat > 'shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/OverlapMix.kt' <<'KT_EOF'
+          package com.music.bitchord.playback.smart
+
+          import kotlin.math.PI
+          import kotlin.math.cos
+          import kotlin.math.sin
+
+          /**
+           * A transition that is not a loop mix, rendered by the same native renderer
+           * instead of two players and volume ramps: the outgoing song hands over to a
+           * deck a few seconds before the move, the incoming song runs on its own deck,
+           * and the renderer does the gain (equal power), and the echo, on one clock.
+           *
+           * This first cut covers the [CutGesture]s the planner picks for pairs it cannot
+           * beatmatch. Both decks play at rate 1 (no stretch), so the mix is the music
+           * exactly as it is, with sample-exact edges.
+           *
+           * Pure: reads a [TransitionPlan] and two analyses, returns a [Plan], and lays
+           * it out as a [Clock] and the renderer's gain curves. No audio, no players.
+           */
+          object OverlapMix {
+              /** Master switch. Off: every cut stays on the planner's two-player path, exactly as before. */
+              var enabled: Boolean = false
+
+              /** Seconds of outgoing music the renderer plays before the move starts, so the splice is long settled. */
+              const val TAKEOVER_LEAD_SECONDS = 4.0
+
+              /** Seconds after the move ends before the incoming player takes over from its deck (it needs time to align). */
+              const val SETTLE_SECONDS = 3.0
+
+              /** The takeover can't be earlier than this into the outgoing song. */
+              const val MIN_TAKEOVER_SECONDS = 1.0
+
+              /** Music that must remain in the incoming song after the handover. */
+              const val CLEARANCE_SECONDS = 5.0
+
+              /** Seconds the echo's send ramps up over at the start of an echo-out, in beats. */
+              private const val ECHO_RAMP_BEATS = 1.0
+
+              /** How fast the echo send closes at the end of the overlap. */
+              private const val ECHO_CLOSE_SECONDS = 0.05
+
+              /** Echo feedback: five repeats later (see [echoTailSeconds]) it is about -30 dB. */
+              const val ECHO_FEEDBACK = 0.5f
+              const val ECHO_RETURN = 0.8f
+
+              private const val FADE_POINTS = 8
+              private const val MAX_BEATS = 512
+
+              data class Plan(
+                  val gesture: CutGesture,
+                  /** Outgoing track second at mix t0. */
+                  val takeover: Double,
+                  /** Mix seconds at which the move starts and ends. */
+                  val cutStart: Double,
+                  val cutEnd: Double,
+                  /** Incoming track second at mix [cutStart]. */
+                  val inCue: Double,
+                  /** Seconds per beat of each song, for the scrubber's pulse. */
+                  val outBeat: Double,
+                  val inBeat: Double,
+                  /** Echo delay in seconds; 0 for no echo. */
+                  val echoSeconds: Double,
+                  /** Seconds the echo keeps ringing after [cutEnd]. */
+                  val tail: Double,
+              ) {
+                  val echo: Boolean get() = echoSeconds > 0.0
+              }
+
+              /** A piecewise-linear curve over mix seconds, as the renderer takes it. */
+              class Curve(val times: DoubleArray, val values: FloatArray)
+
+              /**
+               * The overlap mix for a cut the planner already chose ([plan]'s reason is a
+               * [CutGesture]'s), or null when the cut does not fit the renderer: the move
+               * starts too early in the song to take over before it, the echo's tail would
+               * run past the file, or too little of the incoming song is left.
+               */
+              fun fromCut(
+                  plan: TransitionPlan,
+                  analysis: TrackAnalysis,
+                  nextAnalysis: TrackAnalysis,
+                  length: Double,
+                  nextLength: Double,
+              ): Plan? {
+                  if (!enabled || plan.blocked) return null
+                  val gesture = when (plan.reason.removePrefix("before-")) {
+                      CutGesture.QUICK_CUT.reason -> CutGesture.QUICK_CUT
+                      CutGesture.DROP_CUT.reason -> CutGesture.DROP_CUT
+                      CutGesture.ECHO_CUT.reason -> CutGesture.ECHO_CUT
+                      else -> return null
+                  }
+                  val takeover = plan.transitionStart - TAKEOVER_LEAD_SECONDS
+                  if (takeover < MIN_TAKEOVER_SECONDS) return null
+                  val cutStart = TAKEOVER_LEAD_SECONDS
+                  val cutEnd = plan.transitionEnd - takeover
+                  if (cutEnd <= cutStart) return null
+                  val echo = if (gesture == CutGesture.ECHO_CUT) plan.echoSeconds.orZero() else 0.0
+                  val tail = if (echo > 0.0) echoTailSeconds(echo) else 0.0
+                  if (length > 0.0 && takeover + cutEnd + tail > length - 0.25) return null
+                  val inCue = plan.incomingCueTime
+                  if (!inCue.isFinite() || inCue < 0.0) return null
+                  val handoverTrack = inCue + (cutEnd + SETTLE_SECONDS - cutStart)
+                  if (nextLength > 0.0 && handoverTrack > nextLength - CLEARANCE_SECONDS) return null
+                  return Plan(
+                      gesture = gesture,
+                      takeover = takeover,
+                      cutStart = cutStart,
+                      cutEnd = cutEnd,
+                      inCue = inCue,
+                      outBeat = beatOf(plan.beatSeconds, analysis),
+                      inBeat = beatOf(0.0, nextAnalysis),
+                      echoSeconds = echo,
+                      tail = tail,
+                  )
+              }
+
+              private fun beatOf(given: Double, analysis: TrackAnalysis): Double {
+                  if (given > 0.0) return given
+                  val interval = analysis.beatInterval.orZero()
+                  if (interval > 0.0) return interval
+                  val bpm = analysis.bpm.orZero()
+                  return if (bpm > 0.0) 60.0 / bpm else 0.5
+              }
+
+              // ---- The renderer's curves -----------------------------------------------------------------
+
+              /** The outgoing deck's gain: joins the song at t0 (over the sink's own [handover]), then an equal-power fall. */
+              fun outGain(plan: Plan, handover: Double): Curve {
+                  val times = ArrayList<Double>()
+                  val values = ArrayList<Float>()
+                  times += -handover; values += 0f
+                  times += 0.0; values += 1f
+                  times += plan.cutStart; values += 1f
+                  for (i in 1..FADE_POINTS) {
+                      val f = i.toDouble() / FADE_POINTS
+                      times += plan.cutStart + (plan.cutEnd - plan.cutStart) * f
+                      values += if (i == FADE_POINTS) 0f else cos(PI / 2 * f).toFloat()
+                  }
+                  return Curve(times.toDoubleArray(), values.toFloatArray())
+              }
+
+              /** The incoming deck's gain: silent until the move, an equal-power rise, then full. */
+              fun inGain(plan: Plan): Curve {
+                  val times = ArrayList<Double>()
+                  val values = ArrayList<Float>()
+                  times += 0.0; values += 0f
+                  times += plan.cutStart; values += 0f
+                  for (i in 1..FADE_POINTS) {
+                      val f = i.toDouble() / FADE_POINTS
+                      times += plan.cutStart + (plan.cutEnd - plan.cutStart) * f
+                      values += if (i == FADE_POINTS) 1f else sin(PI / 2 * f).toFloat()
+                  }
+                  return Curve(times.toDoubleArray(), values.toFloatArray())
+              }
+
+              /**
+               * What the outgoing deck feeds its echo: nothing until the move, a beat's
+               * ramp up, full to the end of the overlap, then closed so the repeats ring
+               * out on their own. Null when the gesture has no echo.
+               */
+              fun echoSend(plan: Plan): Curve? {
+                  if (!plan.echo) return null
+                  val ramp = minOf(plan.outBeat * ECHO_RAMP_BEATS, (plan.cutEnd - plan.cutStart) / 2)
+                  return Curve(
+                      doubleArrayOf(0.0, plan.cutStart, plan.cutStart + ramp, plan.cutEnd, plan.cutEnd + ECHO_CLOSE_SECONDS),
+                      floatArrayOf(0f, 0f, 1f, 1f, 0f),
+                  )
+              }
+
+              // ---- The clock -------------------------------------------------------------------------------
+
+              class Clock(val plan: Plan) : MixTimeline {
+                  override val takeoverSeconds: Double get() = plan.takeover
+                  override val releaseAt: Double get() = plan.cutEnd
+                  override val handoffAt: Double get() = (plan.cutStart + plan.cutEnd) / 2
+                  override val elementAt: Double = plan.cutEnd + SETTLE_SECONDS
+                  override val elementTrackTime: Double = plan.inCue + (elementAt - plan.cutStart)
+
+                  /** The outgoing song's beats up to the end of the move, the incoming song's after it. */
+                  override val beatTimes: DoubleArray = run {
+                      val times = ArrayList<Double>()
+                      var t = 0.0
+                      times += t
+                      while (t < elementAt + 1.0 && times.size < MAX_BEATS) {
+                          t += if (t < plan.cutEnd - 1e-9) plan.outBeat else plan.inBeat
+                          times += t
+                      }
+                      times.toDoubleArray()
+                  }
+
+                  override fun beatAt(t: Double): Pair<Int, Double> {
+                      if (t < 0) return -1 to 0.0
+                      var low = 0
+                      var high = beatTimes.size - 1
+                      while (low < high) {
+                          val mid = (low + high + 1) ushr 1
+                          if (beatTimes[mid] <= t) low = mid else high = mid - 1
+                      }
+                      val k = low
+                      if (k + 1 >= beatTimes.size) return k to 0.0
+                      return k to minOf(1.0, (t - beatTimes[k]) / (beatTimes[k + 1] - beatTimes[k]))
+                  }
+
+                  override fun positionAt(side: LoopMix.Side, t: Double): Double? {
+                      if (t < 0) return null
+                      return when (side) {
+                          LoopMix.Side.OUT -> if (t < plan.cutEnd + plan.tail) plan.takeover + t else null
+                          LoopMix.Side.IN -> if (t >= plan.cutStart) plan.inCue + (t - plan.cutStart) else null
+                      }
+                  }
+              }
+          }
+          KT_EOF
+          mkdir -p "$(dirname 'shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/OverlapMixTest.kt')"
+          cat > 'shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/OverlapMixTest.kt' <<'KT_EOF'
+          package com.music.bitchord.playback.smart
+
+          import kotlin.math.PI
+          import kotlin.math.abs
+          import kotlin.math.cos
+          import kotlin.math.sin
+          import kotlin.test.Test
+          import kotlin.test.assertEquals
+          import kotlin.test.assertNotNull
+          import kotlin.test.assertNull
+          import kotlin.test.assertTrue
+
+          class OverlapMixTest {
+
+              private fun track(
+                  id: String,
+                  bpm: Double,
+                  key: String,
+                  vocal: Double,
+                  duration: Double = 200.0,
+                  energy: (Double) -> Double = { 1.0 },
+              ): TrackAnalysis {
+                  val beat = 60.0 / bpm
+                  val downbeats = generateSequence(0.5) { it + 4 * beat }.takeWhile { it < duration - 1 }.toList()
+                  val curve = (0 until (duration * 2).toInt()).map { EnergySample(it / 2.0, energy(it / 2.0)) }
+                  return TrackAnalysis(
+                      status = TrackAnalysis.STATUS_READY,
+                      trackId = id,
+                      duration = duration,
+                      bpm = bpm,
+                      beatInterval = beat,
+                      beatConfidence = 0.9,
+                      downbeats = downbeats,
+                      phraseBoundaries = downbeats.filterIndexed { index, _ -> index % 8 == 0 },
+                      firstBeat = 0.5,
+                      key = key,
+                      keyConfidence = 0.9,
+                      audibleStartTime = 0.5,
+                      contentEndTime = duration - 2,
+                      mixInTime = downbeats[4],
+                      energyCurve = curve,
+                      vocalProbability = vocal,
+                  )
+              }
+
+              private fun cut(current: TrackAnalysis, next: TrackAnalysis): TransitionPlan? = TransitionRepertoire.plan(
+                  analysis = current,
+                  nextAnalysis = next,
+                  length = current.duration,
+                  nextLength = next.duration,
+                  finalMixAnchor = current.contentEndTime,
+                  advanced = true,
+              )
+
+              /** Runs [block] with the overlap engine and the echo gesture on, whatever the build's defaults are. */
+              private inline fun <T> overlapOn(enabled: Boolean = true, block: () -> T): T {
+                  val before = OverlapMix.enabled
+                  val echoBefore = TransitionRepertoire.echoCutEnabled
+                  OverlapMix.enabled = enabled
+                  TransitionRepertoire.echoCutEnabled = true
+                  try {
+                      return block()
+                  } finally {
+                      OverlapMix.enabled = before
+                      TransitionRepertoire.echoCutEnabled = echoBefore
+                  }
+              }
+
+              private fun overlapOf(current: TrackAnalysis, next: TrackAnalysis): OverlapMix.Plan? {
+                  val plan = cut(current, next) ?: return null
+                  return OverlapMix.fromCut(plan, current, next, current.duration, next.duration)
+              }
+
+              @Test
+              fun aQuickCutBecomesAnOverlapMixOnTheSameEdges() = overlapOn {
+                  val current = track("a", 120.0, "C major", vocal = 0.9)
+                  val next = track("b", 94.0, "F♯ major", vocal = 0.9)
+                  val cutPlan = assertNotNull(cut(current, next))
+                  val overlap = assertNotNull(OverlapMix.fromCut(cutPlan, current, next, current.duration, next.duration))
+                  assertEquals(CutGesture.QUICK_CUT, overlap.gesture)
+                  assertEquals(OverlapMix.TAKEOVER_LEAD_SECONDS, overlap.cutStart, 1e-9)
+                  // The mix's clock puts the move on the planner's own edges.
+                  assertEquals(cutPlan.transitionStart, overlap.takeover + overlap.cutStart, 1e-9)
+                  assertEquals(cutPlan.transitionEnd, overlap.takeover + overlap.cutEnd, 1e-9)
+                  assertEquals(cutPlan.incomingCueTime, overlap.inCue, 1e-9)
+                  assertTrue(!overlap.echo)
+                  assertEquals(0.0, overlap.tail)
+              }
+
+              @Test
+              fun anEchoOutKeepsItsDelayAndItsTail() = overlapOn {
+                  val current = track("a", 120.0, "C major", vocal = 0.1)
+                  val next = track("b", 94.0, "C major", vocal = 0.1) { if (it < 12.0) 0.2 else 1.0 }
+                  val overlap = assertNotNull(overlapOf(current, next))
+                  assertEquals(CutGesture.ECHO_CUT, overlap.gesture)
+                  assertEquals(0.5, overlap.echoSeconds, 1e-9)
+                  assertEquals(echoTailSeconds(0.5), overlap.tail, 1e-9)
+                  val send = assertNotNull(OverlapMix.echoSend(overlap))
+                  assertEquals(0f, send.values.first())
+                  assertEquals(0f, send.values.last())
+                  assertTrue(send.times.last() > overlap.cutEnd, "the send closes after the overlap, so the repeats ring on")
+                  assertTrue(send.times.toList().zipWithNext().all { (a, b) -> b >= a }, "times rise")
+              }
+
+              @Test
+              fun offWhenSwitchedOffAndForPlansThatAreNotCuts() {
+                  val current = track("a", 120.0, "C major", vocal = 0.9)
+                  val next = track("b", 94.0, "F♯ major", vocal = 0.9)
+                  val cutPlan = assertNotNull(cut(current, next))
+                  overlapOn(enabled = false) {
+                      assertNull(OverlapMix.fromCut(cutPlan, current, next, current.duration, next.duration))
+                  }
+                  overlapOn {
+                      assertNull(OverlapMix.fromCut(cutPlan.copy(reason = "before-unmixable-crossfade"), current, next, 200.0, 200.0))
+                      assertNull(OverlapMix.fromCut(cutPlan.copy(blocked = true), current, next, 200.0, 200.0))
+                      assertNotNull(OverlapMix.fromCut(cutPlan, current, next, current.duration, next.duration))
+                  }
+              }
+
+              @Test
+              fun anEchoTailThatWouldRunPastTheFileIsRefused() = overlapOn {
+                  val current = track("a", 120.0, "C major", vocal = 0.1)
+                  val next = track("b", 94.0, "C major", vocal = 0.1) { if (it < 12.0) 0.2 else 1.0 }
+                  val cutPlan = assertNotNull(cut(current, next))
+                  assertNotNull(OverlapMix.fromCut(cutPlan, current, next, current.duration, next.duration))
+                  assertNull(OverlapMix.fromCut(cutPlan, current, next, cutPlan.transitionEnd + 0.5, next.duration))
+              }
+
+              @Test
+              fun aSongTooShortAfterTheHandoverIsRefused() = overlapOn {
+                  val current = track("a", 120.0, "C major", vocal = 0.9)
+                  val next = track("b", 94.0, "F♯ major", vocal = 0.9)
+                  val cutPlan = assertNotNull(cut(current, next))
+                  assertNull(OverlapMix.fromCut(cutPlan, current, next, current.duration, cutPlan.incomingCueTime + 6.0))
+              }
+
+              @Test
+              fun theClockHandsOverInTheMiddleOfTheMoveAndTheIncomingPlayerTakesOverAfter() = overlapOn {
+                  val overlap = assertNotNull(overlapOf(track("a", 120.0, "C major", 0.9), track("b", 94.0, "F♯ major", 0.9)))
+                  val clock = OverlapMix.Clock(overlap)
+                  assertEquals(overlap.takeover, clock.takeoverSeconds)
+                  assertTrue(clock.handoffAt > overlap.cutStart && clock.handoffAt < overlap.cutEnd)
+                  assertTrue(clock.elementAt > overlap.cutEnd)
+                  // The incoming player's track position at its takeover continues the deck's, at rate 1.
+                  assertEquals(overlap.inCue + (clock.elementAt - overlap.cutStart), clock.elementTrackTime, 1e-9)
+                  assertEquals(overlap.inCue, clock.positionAt(LoopMix.Side.IN, overlap.cutStart)!!, 1e-9)
+                  assertEquals(clock.elementTrackTime, clock.positionAt(LoopMix.Side.IN, clock.elementAt)!!, 1e-9)
+                  assertEquals(overlap.takeover, clock.positionAt(LoopMix.Side.OUT, 0.0)!!, 1e-9)
+                  assertNull(clock.positionAt(LoopMix.Side.IN, overlap.cutStart - 1.0))
+                  assertNull(clock.positionAt(LoopMix.Side.OUT, -0.1))
+                  assertNull(clock.positionAt(LoopMix.Side.OUT, overlap.cutEnd + overlap.tail + 0.1))
+              }
+
+              @Test
+              fun theBeatClockRisesAndCoversTheWholeMix() = overlapOn {
+                  val overlap = assertNotNull(overlapOf(track("a", 120.0, "C major", 0.9), track("b", 94.0, "F♯ major", 0.9)))
+                  val clock = OverlapMix.Clock(overlap)
+                  assertEquals(0.0, clock.beatTimes.first())
+                  assertTrue(clock.beatTimes.size >= 2)
+                  assertTrue(clock.beatTimes.toList().zipWithNext().all { (a, b) -> b > a })
+                  assertTrue(clock.beatTimes.last() >= clock.elementAt)
+                  assertEquals(-1, clock.beatAt(-0.5).first)
+                  assertEquals(0, clock.beatAt(0.1).first)
+                  // Before the move the beat is the outgoing song's (0.5 s), after it the incoming song's.
+                  assertEquals(0.5, clock.beatTimes[1] - clock.beatTimes[0], 1e-9)
+                  val late = clock.beatAt(clock.elementAt).first
+                  assertEquals(60.0 / 94.0, clock.beatTimes[late + 1] - clock.beatTimes[late], 1e-9)
+              }
+
+              @Test
+              fun theGainCurvesAreEqualPowerAndMeetAtTheHandoverEdges() = overlapOn {
+                  val overlap = assertNotNull(overlapOf(track("a", 120.0, "C major", 0.9), track("b", 94.0, "F♯ major", 0.9)))
+                  val out = OverlapMix.outGain(overlap, LoopMix.HANDOVER_SEC)
+                  val inn = OverlapMix.inGain(overlap)
+                  assertEquals(0f, out.values.first())
+                  assertEquals(1f, out.values[1])
+                  assertEquals(0f, out.values.last())
+                  assertEquals(0f, inn.values.first())
+                  assertEquals(1f, inn.values.last())
+                  assertTrue(out.times.toList().zipWithNext().all { (a, b) -> b >= a })
+                  assertTrue(inn.times.toList().zipWithNext().all { (a, b) -> b >= a })
+                  // At every point inside the move the two gains carry (nearly) constant power.
+                  val span = overlap.cutEnd - overlap.cutStart
+                  for (step in 1 until 8) {
+                      val t = overlap.cutStart + span * step / 8
+                      val o = out.values[out.times.indexOfFirst { abs(it - t) < 1e-9 }]
+                      val i = inn.values[inn.times.indexOfFirst { abs(it - t) < 1e-9 }]
+                      assertEquals(1.0, (o * o + i * i).toDouble(), 1e-5, "power at step $step")
+                      assertEquals(cos(PI / 2 * step / 8), o.toDouble(), 1e-5)
+                      assertEquals(sin(PI / 2 * step / 8), i.toDouble(), 1e-5)
+                  }
+              }
+          }
+          KT_EOF
+          mkdir -p "$(dirname 'app/src/main/java/com/music/bitchord/playback/loopmix/OverlapMixSession.kt')"
+          cat > 'app/src/main/java/com/music/bitchord/playback/loopmix/OverlapMixSession.kt' <<'KT_EOF'
+          package com.music.bitchord.playback.loopmix
+
+          import android.util.Log
+          import com.music.bitchord.playback.smart.LoopMix
+          import com.music.bitchord.playback.smart.OverlapMix
+          import kotlin.math.max
+
+          /**
+           * Builds a [LoopMixSession] for an [OverlapMix] (a cut or echo-out): the same
+           * renderer, ports and controller path as the loop mix, with two decks that
+           * don't loop and don't stretch. The outgoing song hands over to its deck at
+           * [OverlapMix.Plan.takeover]; the incoming deck is already running, silent,
+           * when the move starts; the renderer does the gain curve and the echo.
+           */
+          object OverlapMixSession {
+              private const val TAG = "BitChordOverlapMix"
+
+              /** Seconds of each song decoded either side of what its deck plays. */
+              private const val PREROLL_SECONDS = 1.0
+              private const val TAIL_SECONDS = 3.0
+
+              /** The incoming deck starts this many mix seconds before the move, so its first audible sample is settled. */
+              private const val IN_LEAD_SECONDS = 0.6
+
+              /** Blocking: call off the main thread. [decode] returns track seconds from..to at [sampleRate], or null. */
+              fun build(
+                  plan: OverlapMix.Plan,
+                  outId: String,
+                  inId: String,
+                  sampleRate: Int,
+                  inLevel: Float,
+                  decode: (side: LoopMix.Side, from: Double, to: Double) -> LoopRegion?,
+              ): LoopMixSession? {
+                  if (!LoopMixRenderer.available || sampleRate <= 0) return null
+                  val clock = OverlapMix.Clock(plan)
+                  val outRegion = decode(
+                      LoopMix.Side.OUT,
+                      plan.takeover - PREROLL_SECONDS,
+                      plan.takeover + plan.cutEnd + plan.tail + 0.5,
+                  ) ?: return null
+                  val inFrom = max(0.0, plan.inCue - IN_LEAD_SECONDS - PREROLL_SECONDS)
+                  val inRegion = decode(LoopMix.Side.IN, inFrom, clock.elementTrackTime + TAIL_SECONDS) ?: return null
+                  if (outRegion.start > plan.takeover || inRegion.start > inFrom + 0.05) {
+                      Log.w(TAG, "a region starts too late: out ${outRegion.start}, in ${inRegion.start}")
+                      return null
+                  }
+                  val renderer = LoopMixRenderer(sampleRate)
+                  if (!renderer.isValid) return null
+                  val sr = sampleRate.toDouble()
+
+                  fun samplesOf(region: LoopRegion, trackSeconds: Double) = (trackSeconds - region.start) * sr
+
+                  // Outgoing: plain playback from the takeover, through the move and the echo's tail. It stops after.
+                  val outEnd = clock.releaseAt + plan.tail
+                  renderer.setDeck(
+                      LoopMixRenderer.OUT,
+                      LoopMixRenderer.DeckSetup(
+                          left = outRegion.left,
+                          right = outRegion.right,
+                          regionStart = outRegion.start,
+                          loopStart = 0L,
+                          loopEnd = 0L,
+                          releaseAt = 1e18,
+                          knotFrames = doubleArrayOf(0.0, outEnd * sr),
+                          knotPositions = doubleArrayOf(samplesOf(outRegion, plan.takeover), samplesOf(outRegion, plan.takeover + outEnd)),
+                          runOn = false,
+                          stopAt = outEnd + 0.05,
+                          preroll = 0.4,
+                          level = 1f,
+                      ),
+                  )
+                  // Incoming: running from just before the move at rate 1, and on past the last knot. No loop:
+                  // releaseAt 0 makes "track second -> deck position" a plain offset for the fade-out at the handover.
+                  val inStart = plan.cutStart - IN_LEAD_SECONDS
+                  renderer.setDeck(
+                      LoopMixRenderer.IN,
+                      LoopMixRenderer.DeckSetup(
+                          left = inRegion.left,
+                          right = inRegion.right,
+                          regionStart = inRegion.start,
+                          loopStart = 0L,
+                          loopEnd = 0L,
+                          releaseAt = 0.0,
+                          knotFrames = doubleArrayOf(inStart * sr, clock.elementAt * sr),
+                          knotPositions = doubleArrayOf(
+                              samplesOf(inRegion, plan.inCue - IN_LEAD_SECONDS),
+                              samplesOf(inRegion, clock.elementTrackTime),
+                          ),
+                          runOn = true,
+                          stopAt = clock.elementAt + 2.0,
+                          preroll = 0.4,
+                          level = inLevel,
+                      ),
+                  )
+                  val outGain = OverlapMix.outGain(plan, LoopMix.HANDOVER_SEC)
+                  renderer.setEnvelope(LoopMixRenderer.OUT, LoopMixRenderer.KIND_GAIN, outGain.times, outGain.values)
+                  val inGain = OverlapMix.inGain(plan)
+                  renderer.setEnvelope(LoopMixRenderer.IN, LoopMixRenderer.KIND_GAIN, inGain.times, inGain.values)
+                  OverlapMix.echoSend(plan)?.let { send ->
+                      renderer.setEcho(LoopMixRenderer.OUT, plan.echoSeconds, OverlapMix.ECHO_FEEDBACK, OverlapMix.ECHO_RETURN)
+                      renderer.setEnvelope(LoopMixRenderer.OUT, LoopMixRenderer.KIND_ECHO_SEND, send.times, send.values)
+                  }
+                  renderer.prepare()
+                  // The incoming deck hands over to its own player at the same track position.
+                  renderer.setFadeOut(LoopMixRenderer.IN, clock.elementTrackTime)
+                  Log.d(TAG, "built ${plan.gesture.reason}: takeover ${"%.2f".format(plan.takeover)}s, move ${"%.2f".format(plan.cutStart)}..${"%.2f".format(plan.cutEnd)}s")
+                  return LoopMixSession(null, clock, outId, inId, renderer, sampleRate).also {
+                      it.label = "${plan.gesture.reason.removePrefix("smart-cut-")} cut"
+                      it.planIncomingStart()
+                  }
+              }
+          }
+          KT_EOF
+          mkdir -p "$(dirname 'native/loopmix/tests/echo_test.cpp')"
+          cat > 'native/loopmix/tests/echo_test.cpp' <<'CPP_EOF'
+          // Host test for the loop mix renderer's echo: a short tone burst through a deck with a feedback
+          // delay must come back after the delay, quieter by the feedback each time, and the repeats must
+          // keep ringing after the send closes and the dry gain is zero. Built and run by the workflow.
+          #include <cmath>
+          #include <cstdio>
+          #include <vector>
+
+          #include "loopmix/loop_mix_renderer.h"
+
+          using bitchord::loopmix::Renderer;
+
+          static double rms(const std::vector<float>& left, int from, int to) {
+            double sum = 0;
+            for (int i = from; i < to; ++i) sum += double(left[i]) * left[i];
+            return std::sqrt(sum / std::max(1, to - from));
+          }
+
+          int main() {
+            const int sr = 48000;
+            const double delay = 0.5;
+            const float feedback = 0.5f;
+            const float ret = 0.8f;
+            const int regionFrames = sr * 12;
+            std::vector<float> tone(regionFrames, 0.f);
+            // A 0.2 s burst of 220 Hz starting at 2.0 s of the region.
+            for (int i = 0; i < int(0.2 * sr); ++i) {
+              tone[2 * sr + i] = 0.5f * float(std::sin(2 * 3.14159265358979 * 220.0 * i / sr));
+            }
+
+            Renderer renderer(sr);
+            auto& deck = renderer.deck(0);
+            deck.left = tone;
+            deck.right = tone;
+            deck.regionStart = 0;
+            deck.loopStart = 0;
+            deck.loopEnd = 0;
+            deck.releaseAt = 1e18;
+            // Mix t0 = region second 0; rate 1 for 10 s.
+            deck.knotTimes = {0.0, 10.0 * sr};
+            deck.knotPositions = {0.0, 10.0 * sr};
+            deck.runOn = false;
+            deck.stopAt = 10.0;
+            deck.preroll = 0.4;
+            deck.level = 1.f;
+            // Dry gain 1 until 2.5 s, then 0 (the burst has ended: only the repeats are left).
+            deck.gain.times = {0.0, 2.5, 2.51};
+            deck.gain.values = {1.f, 1.f, 0.f};
+            // Echo send 1 until 2.3 s then closed: the repeats must ring on by themselves.
+            deck.echoSend.times = {0.0, 2.3, 2.35};
+            deck.echoSend.values = {1.f, 1.f, 0.f};
+            deck.echoDelaySeconds = delay;
+            deck.echoFeedback = feedback;
+            deck.echoReturn = ret;
+            renderer.prepare();
+
+            const int64_t first = renderer.firstFrame();
+            const int total = sr * 8;
+            std::vector<float> interleaved(2 * 1024);
+            std::vector<float> left;
+            int64_t frame = first;
+            while (frame < total) {
+              renderer.render(frame, interleaved.data(), 1024);
+              for (int i = 0; i < 1024; ++i) left.push_back(interleaved[2 * i]);
+              frame += 1024;
+            }
+            auto at = [&](double seconds) { return int(std::llround(seconds * sr) - first); };
+            const double dry = rms(left, at(2.02), at(2.18));
+            const double e1 = rms(left, at(2.0 + delay + 0.02), at(2.0 + delay + 0.18));
+            const double e2 = rms(left, at(2.0 + 2 * delay + 0.02), at(2.0 + 2 * delay + 0.18));
+            const double e3 = rms(left, at(2.0 + 3 * delay + 0.02), at(2.0 + 3 * delay + 0.18));
+            const double gap = rms(left, at(2.0 + 0.25 + 0.02), at(2.0 + delay - 0.02));
+            const double later = rms(left, at(7.0), at(7.8));
+            std::printf("dry=%.4f e1=%.4f e2=%.4f e3=%.4f gap=%.5f later=%.5f\n", dry, e1, e2, e3, gap, later);
+
+            int failures = 0;
+            auto expect = [&](bool ok, const char* what) {
+              if (!ok) {
+                std::printf("FAIL: %s\n", what);
+                ++failures;
+              }
+            };
+            expect(dry > 0.2, "the dry burst is heard");
+            expect(std::fabs(e1 / dry - ret) < 0.08, "first repeat is the return level of the dry burst");
+            expect(std::fabs(e2 / e1 - feedback) < 0.08, "second repeat is feedback times the first");
+            expect(std::fabs(e3 / e2 - feedback) < 0.08, "third repeat is feedback times the second");
+            expect(gap < 0.02 * dry, "silence between the dry burst and its first repeat");
+            expect(later < 0.001, "the tail has died away by the end");
+
+            // A deck with no echo set must render exactly what it did before the echo existed.
+            Renderer plain(sr);
+            auto& d = plain.deck(0);
+            d.left = tone; d.right = tone;
+            d.knotTimes = {0.0, 10.0 * sr}; d.knotPositions = {0.0, 10.0 * sr};
+            d.stopAt = 10.0;
+            plain.prepare();
+            std::vector<float> out(2 * 1024);
+            double energy = 0;
+            for (int64_t f = plain.firstFrame(); f < sr * 3; f += 1024) {
+              plain.render(f, out.data(), 1024);
+              for (float v : out) energy += double(v) * v;
+            }
+            expect(energy > 1.0, "a deck without echo still plays");
+            std::printf(failures == 0 ? "echo test OK\n" : "echo test FAILED\n");
+            return failures == 0 ? 0 : 1;
+          }
+          CPP_EOF
+          mkdir -p "$(dirname '.github/step3-patch.py')"
+          cat > '.github/step3-patch.py' <<'PY_EOF'
+          #!/usr/bin/env python3
+          """Bước 3a: gắn engine overlap (echo native + MixTimeline + nhánh overlap trong controller).
+          Thay đúng chuỗi; nếu một chuỗi gốc không còn (hoặc xuất hiện nhiều lần) thì DỪNG và báo rõ, không sửa dở."""
+          import pathlib, sys
+
+          def patch(path, edits):
+              text = path.read_text(encoding="utf-8")
+              for label, old, new in edits:
+                  if new in text:
+                      print(f"[bỏ qua] {path.name}: {label} (đã có)")
+                      continue
+                  n = text.count(old)
+                  if n != 1:
+                      sys.exit(f"LỖI: {path.name}: '{label}' tìm thấy {n} chỗ (cần đúng 1). Code gốc đã đổi, cần chỉnh lại patch.")
+                  text = text.replace(old, new)
+                  print(f"[ok] {path.name}: {label}")
+              path.write_text(text, encoding="utf-8")
+
+          NATIVE = pathlib.Path("native/loopmix")
+          JNI = pathlib.Path("app/src/main/cpp/jni")
+          SMART = pathlib.Path("shared/src/commonMain/kotlin/com/music/bitchord/playback/smart")
+          LOOPMIX = pathlib.Path("app/src/main/java/com/music/bitchord/playback/loopmix")
+          APP = pathlib.Path("app/src/main/java/com/music/bitchord/playback")
+
+          # ---- 1. Renderer native: echo (feedback delay) trên từng deck ----------------------------------
+          patch(NATIVE / "loop_mix_renderer.h", [
+              ("trường echo của deck",
+               "  Envelope highPassHz;\n",
+               "  Envelope highPassHz;\n"
+               "  /** Echo: send level over mix time into a feedback delay; repeats ring on after the send drops to 0. */\n"
+               "  Envelope echoSend;\n"
+               "  double echoDelaySeconds = 0;\n"
+               "  float echoFeedback = 0.5f;\n"
+               "  float echoReturn = 0.8f;\n"),
+              ("trạng thái echo của deck",
+               "  float highPassFreq = 0;\n",
+               "  float highPassFreq = 0;\n"
+               "  std::vector<float> echoL, echoR;\n"
+               "  int echoPos = 0;\n"),
+          ])
+
+          patch(NATIVE / "loop_mix_renderer.cpp", [
+              ("cấp buffer echo khi prepare",
+               "    deck.highPassFreq = 0;\n",
+               "    deck.highPassFreq = 0;\n"
+               "    const int echoLen = deck.echoDelaySeconds > 0 ? int(std::lround(deck.echoDelaySeconds * sampleRate_)) : 0;\n"
+               "    deck.echoL.assign(echoLen, 0.f);\n"
+               "    deck.echoR.assign(echoLen, 0.f);\n"
+               "    deck.echoPos = 0;\n"),
+              ("send echo theo khối điều khiển",
+               "    const float g1 = deck.gain.empty() ? 1.f : deck.gain.at(t1);\n",
+               "    const float g1 = deck.gain.empty() ? 1.f : deck.gain.at(t1);\n"
+               "    const bool echoOn = !deck.echoL.empty();\n"
+               "    const float s0 = echoOn && !deck.echoSend.empty() ? deck.echoSend.at(t0) : 0.f;\n"
+               "    const float s1 = echoOn && !deck.echoSend.empty() ? deck.echoSend.at(t1) : 0.f;\n"),
+              ("echo trong vòng mẫu",
+               "      mixLeft_[n] += l * g;\n      mixRight_[n] += r * g;\n",
+               "      float echoOutL = 0.f, echoOutR = 0.f;\n"
+               "      if (echoOn) {\n"
+               "        const float send = s0 + (s1 - s0) * (float(i) / count);\n"
+               "        const int p = deck.echoPos;\n"
+               "        echoOutL = deck.echoL[p];\n"
+               "        echoOutR = deck.echoR[p];\n"
+               "        deck.echoL[p] = l * send + echoOutL * deck.echoFeedback;\n"
+               "        deck.echoR[p] = r * send + echoOutR * deck.echoFeedback;\n"
+               "        if (++deck.echoPos >= int(deck.echoL.size())) deck.echoPos = 0;\n"
+               "      }\n"
+               "      mixLeft_[n] += l * g + echoOutL * deck.echoReturn * deck.level;\n"
+               "      mixRight_[n] += r * g + echoOutR * deck.echoReturn * deck.level;\n"),
+          ])
+
+          patch(JNI / "loopmix_jni.cpp", [
+              ("envelope loại 3 = echo send",
+               "kind == 2 ? &deck->highPassHz : nullptr;",
+               "kind == 2 ? &deck->highPassHz\n"
+               "                                                                  : kind == 3 ? &deck->echoSend : nullptr;"),
+              ("JNI nativeSetEcho",
+               "}  // extern \"C\"",
+               "JNIEXPORT void JNICALL\n"
+               "Java_com_music_bitchord_playback_loopmix_LoopMixRenderer_nativeSetEcho(JNIEnv*, jclass, jlong handle, jint index,\n"
+               "                                                                     jdouble delaySeconds, jfloat feedback,\n"
+               "                                                                     jfloat returnLevel) {\n"
+               "  Deck* deck = DeckOf(handle, index);\n"
+               "  if (deck == nullptr) return;\n"
+               "  deck->echoDelaySeconds = delaySeconds;\n"
+               "  deck->echoFeedback = feedback;\n"
+               "  deck->echoReturn = returnLevel;\n"
+               "}\n\n"
+               "}  // extern \"C\""),
+          ])
+
+          patch(LOOPMIX / "LoopMixRenderer.kt", [
+              ("setEcho",
+               "    fun prepare() = nativePrepare(handle)\n",
+               "    /** Echo on deck [index]: a feedback delay of [delaySeconds]; its send level is the [KIND_ECHO_SEND] envelope. */\n"
+               "    fun setEcho(index: Int, delaySeconds: Double, feedback: Float, returnLevel: Float) =\n"
+               "        nativeSetEcho(handle, index, delaySeconds, feedback, returnLevel)\n\n"
+               "    fun prepare() = nativePrepare(handle)\n"),
+              ("KIND_ECHO_SEND",
+               "        const val KIND_HIGH_PASS_HZ = 2\n",
+               "        const val KIND_HIGH_PASS_HZ = 2\n        const val KIND_ECHO_SEND = 3\n"),
+              ("khai báo nativeSetEcho",
+               "        @JvmStatic private external fun nativePrepare(handle: Long)\n",
+               "        @JvmStatic private external fun nativeSetEcho(\n"
+               "            handle: Long, index: Int, delaySeconds: Double, feedback: Float, returnLevel: Float,\n"
+               "        )\n"
+               "        @JvmStatic private external fun nativePrepare(handle: Long)\n"),
+          ])
+
+          # ---- 2. LoopMix.Clock trở thành một MixTimeline -------------------------------------------------
+          patch(SMART / "LoopMix.kt", [
+              ("Clock : MixTimeline",
+               "    class Clock(val plan: Plan) {\n",
+               "    class Clock(val plan: Plan) : MixTimeline {\n"
+               "        override val takeoverSeconds: Double get() = plan.out.loopStart\n"
+               "        override fun positionAt(side: Side, t: Double): Double? = LoopMix.positionAt(this, side, t)\n\n"),
+              ("override beatTimes",
+               "        val beatTimes: DoubleArray = DoubleArray(",
+               "        override val beatTimes: DoubleArray = DoubleArray("),
+              ("override handoffAt",
+               "        val handoffAt: Double get() =",
+               "        override val handoffAt: Double get() ="),
+              ("override releaseAt",
+               "        val releaseAt: Double get() =",
+               "        override val releaseAt: Double get() ="),
+              ("override elementAt",
+               "        val elementAt: Double get() =",
+               "        override val elementAt: Double get() ="),
+              ("override elementTrackTime",
+               "        val elementTrackTime: Double get() =",
+               "        override val elementTrackTime: Double get() ="),
+              ("override beatAt",
+               "        fun beatAt(t: Double): Pair<Int, Double> {",
+               "        override fun beatAt(t: Double): Pair<Int, Double> {"),
+          ])
+
+          # ---- 3. LoopMixSession đọc MixTimeline thay vì LoopMix.Clock ----------------------------------
+          patch(LOOPMIX / "LoopMixSession.kt", [
+              ("constructor internal",
+               "class LoopMixSession private constructor(\n    val plan: LoopMix.Plan,\n    val clock: LoopMix.Clock,\n",
+               "class LoopMixSession internal constructor(\n    /** The loop plan; null for an overlap mix (cut / echo-out), which has no loops. */\n    val plan: LoopMix.Plan?,\n    val clock: MixTimeline,\n"),
+              ("takeoverUs từ timeline",
+               "    val takeoverUs: Long = (plan.out.loopStart * 1_000_000).roundToLong()\n",
+               "    val takeoverUs: Long = (clock.takeoverSeconds * 1_000_000).roundToLong()\n\n"
+               "    /** What the stats line calls this mix when it has no loop plan to describe. */\n"
+               "    var label: String = \"overlap mix\"\n"),
+              ("mixSeconds từ timeline",
+               "outPort.presentedSeconds(nowNanos, playing)?.let { it - plan.out.loopStart }",
+               "outPort.presentedSeconds(nowNanos, playing)?.let { it - clock.takeoverSeconds }"),
+              ("import MixTimeline",
+               "import com.music.bitchord.playback.smart.LoopMix\n",
+               "import com.music.bitchord.playback.smart.LoopMix\nimport com.music.bitchord.playback.smart.MixTimeline\n"),
+          ])
+
+          # ---- 4. CrossfadeController: nhánh overlap + đọc timeline ---------------------------------------
+          OVERLAP_BRANCH = '''        // Native engine (OverlapMix): a cut / echo-out the planner chose is rendered by the same
+                  // sink-side renderer as the loop mix (sample-exact, one clock) instead of two players and
+                  // volume ramps. Off unless OverlapMix.enabled; any refusal leaves the planner's own path.
+                  overlapPlanFor(
+                      player, currentItem, nextItem, plan, currentAnalysis, nextAnalysis, duration, nextDuration, analysisState,
+                  )?.let { overlap ->
+                      if (nextStreamReady(nextItem)) {
+                          val takeoverMs = (overlap.takeover * 1000).roundToLong()
+                          AppSettings.smartTransitionWindow.value = TransitionWindow(
+                              start = (plan.transitionStart * 1000.0 / duration).toFloat().coerceIn(0f, 1f),
+                              end = (plan.transitionEnd * 1000.0 / duration).toFloat().coerceIn(0f, 1f),
+                          )
+                          if (markerOnly) return
+                          plannedTransition = currentItem.mediaId to takeoverMs
+                          holdAhead(player, duration)
+                          if (takeoverMs - player.currentPosition > LOOP_ARM_LEAD_MS) return
+                          beginOverlap(player, overlap, currentItem, nextItem, duration, nextDuration)
+                          return
+                      }
+                  }
+
+          '''
+
+          OVERLAP_FUNCS = '''    // ---- Overlap mix (native engine for cuts and echo-outs) -----------------------------------
+
+              private var overlapBlockedPair: String? = null
+              private var overlapActivePair: String? = null
+              private var lastOverlapVerdict = ""
+
+              /** The overlap mix for a cut the planner chose, or null (switch off, no cut, or the pair can't take it). */
+              private fun overlapPlanFor(
+                  player: ExoPlayer,
+                  current: MediaItem,
+                  next: MediaItem,
+                  plan: TransitionPlan,
+                  currentAnalysis: TrackAnalysis,
+                  nextAnalysis: TrackAnalysis,
+                  durationMs: Long,
+                  nextDurationMs: Long,
+                  state: SmartAnalysis,
+              ): OverlapMix.Plan? {
+                  if (!OverlapMix.enabled || plan.blocked || !plan.reason.contains("smart-cut")) return null
+                  val pair = "${current.mediaId}->${next.mediaId}"
+                  if (pair == overlapBlockedPair) return null
+                  val refusal = loopRefusalFor(player, current, next, state)
+                  val overlap = if (refusal == null) {
+                      OverlapMix.fromCut(plan, currentAnalysis, nextAnalysis, durationMs / 1000.0, nextDurationMs / 1000.0)
+                  } else {
+                      null
+                  }
+                  val tooLate = overlap != null && overlap.takeover * 1000 - player.currentPosition < OVERLAP_MIN_LEAD_MS
+                  val verdict = "$pair: " + when {
+                      refusal != null -> "no overlap mix ($refusal)"
+                      overlap == null -> "no overlap mix (planner's cut doesn't fit)"
+                      tooLate -> "no overlap mix (too late to set up)"
+                      else -> "overlap mix ${overlap.gesture.reason} at ${"%.2f".format(Locale.ROOT, overlap.takeover)}s"
+                  }
+                  if (verdict != lastOverlapVerdict) {
+                      lastOverlapVerdict = verdict
+                      Log.d(TAG, "overlap $verdict")
+                  }
+                  return overlap?.takeIf { !tooLate }
+              }
+
+              /** Builds the two decks off the main thread, then arms the sinks exactly as the loop mix does. */
+              private fun beginOverlap(
+                  out: ExoPlayer,
+                  plan: OverlapMix.Plan,
+                  outItem: MediaItem,
+                  inItem: MediaItem,
+                  durationMs: Long,
+                  nextDurationMs: Long,
+              ) {
+                  val into = standby()
+                  if (out === into) return
+                  val nextIndex = out.nextMediaItemIndex
+                  if (nextIndex == C.INDEX_UNSET) return
+                  val outPort = loopPortOf(out) ?: return
+                  val inPort = loopPortOf(into) ?: return
+                  endEase(clickless = false)
+                  phase = Phase.LOOP_ARMING
+                  smartFadeActive = true
+                  handedOff = false
+                  outgoing = out
+                  incoming = into
+                  outgoingItemIndex = out.currentMediaItemIndex
+                  armDeadline = SystemClock.elapsedRealtime() + LOOP_BUILD_TIMEOUT_MS
+                  overlapActivePair = "${outItem.mediaId}->${inItem.mediaId}"
+                  holdAtEnd(out)
+                  val sampleRate = outPort.sampleRate
+                  val inLevel = (loudnessGain(inItem.mediaId) / loudnessGain(outItem.mediaId))
+                      .takeIf { it.isFinite() && it > 0f } ?: 1f
+                  Log.d(
+                      TAG,
+                      "overlap build ${outItem.mediaId}->${inItem.mediaId} (${plan.gesture.reason}) at ${sampleRate}Hz, " +
+                          "takeover at ${"%.2f".format(Locale.ROOT, plan.takeover)}s, playhead ${out.currentPosition}ms",
+                  )
+                  loopBuildJob = scope.launch {
+                      val began = SystemClock.elapsedRealtime()
+                      val session = withContext(Dispatchers.Default) {
+                          runCatching {
+                              OverlapMixSession.build(plan, outItem.mediaId, inItem.mediaId, sampleRate, inLevel) { side, from, to ->
+                                  if (side == LoopMix.Side.OUT) {
+                                      loopRegion(outItem, durationMs, from, to, sampleRate)
+                                  } else {
+                                      loopRegion(inItem, nextDurationMs, from, to, sampleRate)
+                                  }
+                              }
+                          }.onFailure { Log.w(TAG, "overlap build failed", it) }.getOrNull()
+                      }
+                      if (phase != Phase.LOOP_ARMING || outgoing !== out) {
+                          session?.close()
+                          return@launch
+                      }
+                      if (session == null) {
+                          loopFallBack("the overlap decks would not build")
+                          return@launch
+                      }
+                      Log.d(TAG, "overlap decks built in ${SystemClock.elapsedRealtime() - began}ms")
+                      armLoop(session, out, into, nextIndex, outPort, inPort)
+                  }
+              }
+
+          '''
+
+          patch(APP / "CrossfadeController.kt", [
+              ("import OverlapMix",
+               "import com.music.bitchord.playback.smart.LoopMix\n",
+               "import com.music.bitchord.playback.smart.LoopMix\nimport com.music.bitchord.playback.smart.OverlapMix\n"),
+              ("import OverlapMixSession",
+               "import com.music.bitchord.playback.loopmix.LoopMixSession\n",
+               "import com.music.bitchord.playback.loopmix.LoopMixSession\nimport com.music.bitchord.playback.loopmix.OverlapMixSession\n"),
+              ("nhánh overlap sau nhánh loop",
+               "        // Gated on *both* tracks being measured, not on the plan alone.",
+               OVERLAP_BRANCH + "        // Gated on *both* tracks being measured, not on the plan alone."),
+              ("hàm overlap",
+               "    /** The decks are built: the incoming player loads its song, and both sinks are armed. */\n",
+               OVERLAP_FUNCS + "    /** The decks are built: the incoming player loads its song, and both sinks are armed. */\n"),
+              ("vị trí bài đang phát qua timeline",
+               "        val position = LoopMix.positionAt(session.clock, side, m) ?: return null\n",
+               "        val position = session.clock.positionAt(side, m) ?: return null\n"),
+              ("settle sau handover qua timeline",
+               "wasHandedOff -> m?.let { LoopMix.positionAt(session.clock, LoopMix.Side.IN, it) }?.let { (it * 1000).roundToLong() }",
+               "wasHandedOff -> m?.let { session.clock.positionAt(LoopMix.Side.IN, it) }?.let { (it * 1000).roundToLong() }"),
+              ("settle ở bài cũ qua timeline",
+               "tookOver -> (m?.takeIf { it >= 0 }?.let { LoopMix.positionAt(session.clock, LoopMix.Side.OUT, it) }\n"
+               "                ?: session.plan.out.loopStart).let { (it * 1000).roundToLong() }",
+               "tookOver -> (m?.takeIf { it >= 0 }?.let { session.clock.positionAt(LoopMix.Side.OUT, it) }\n"
+               "                ?: session.clock.takeoverSeconds).let { (it * 1000).roundToLong() }"),
+              ("nhãn stats cho overlap",
+               "return \"Automix · $stage · ${describeLoop(session.plan)}$aligned\"",
+               "return \"Automix · $stage · ${session.plan?.let { describeLoop(it) } ?: session.label}$aligned\""),
+              ("lỗi build thì chặn overlap cho cặp này",
+               "        loopPlanned = null\n        loopRefusal = reason\n        loopBail(reason, settle = false)\n",
+               "        loopPlanned = null\n        loopRefusal = reason\n        overlapBlockedPair = overlapActivePair\n        loopBail(reason, settle = false)\n"),
+              ("nhãn stage cho overlap",
+               "                m < session.clock.releaseAt -> \"looping\"\n                else -> \"letting go\"\n",
+               "                m < session.clock.releaseAt -> if (session.plan == null) \"mixing\" else \"looping\"\n"
+               "                else -> if (session.plan == null) \"ringing out\" else \"letting go\"\n"),
+              ("hằng số OVERLAP_MIN_LEAD_MS",
+               "        const val LOOP_MIN_LEAD_MS = 9_000L\n",
+               "        const val LOOP_MIN_LEAD_MS = 9_000L\n\n        /** An overlap mix is only set up while its takeover is at least this far ahead. */\n        const val OVERLAP_MIN_LEAD_MS = 6_000L\n"),
+          ])
+          PY_EOF
+
+      - name: Vá renderer native, LoopMix.Clock, LoopMixSession và CrossfadeController (bước 3)
+        run: python3 .github/step3-patch.py
+
+      - name: Đặt công tắc overlap_engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          F='shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/OverlapMix.kt'
+          sed -i "s/var enabled: Boolean = false/var enabled: Boolean = ${{ inputs.overlap_engine }}/" "$F"
+          grep -n "var enabled" "$F"
+
+      - name: Test native của echo (g++ trên máy chạy, không cần NDK)
+        shell: bash
+        run: |
+          set -euo pipefail
+          g++ -std=c++17 -O1 -I native -I native/third_party/signalsmith-stretch -I native/third_party/signalsmith-linear -I native/third_party \
+            native/loopmix/tests/echo_test.cpp native/loopmix/loop_mix_renderer.cpp -o /tmp/echo_test
+          /tmp/echo_test
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Write local.properties
+        run: |
+          echo "LASTFM_API_KEY=" > local.properties
+          echo "LASTFM_SECRET=" >> local.properties
+          echo "LISTEN_TOGETHER_SERVER=" >> local.properties
+
+      - run: chmod +x gradlew
+
+      - name: Test bộ chọn bài + kiểu cắt + overlap + loop mix + planner cũ
+        if: ${{ inputs.run_tests }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :shared:jvmTest \
+            --tests "com.music.bitchord.playback.smart.NextTrackSelectorTest" \
+            --tests "com.music.bitchord.playback.smart.TransitionRepertoireTest" \
+            --tests "com.music.bitchord.playback.smart.AdvancedAutomixPlannerTest" \
+            --tests "com.music.bitchord.playback.smart.PhraseBarAutomixTest" \
+            --tests "com.music.bitchord.playback.smart.LoopMixTest" \
+            --tests "com.music.bitchord.playback.smart.OverlapMixTest" 2>&1 | tee build.log
+
+      - name: Build APK dev benchmark
+        if: ${{ inputs.build_apk }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew assembleDevBenchmark 2>&1 | tee -a build.log
+          ls -la app/build/outputs/apk/dev/benchmark/
+
+      - name: Upload APK arm64
+        if: ${{ inputs.build_apk }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitchord-step1-3-automix-arm64
+          path: app/build/outputs/apk/dev/benchmark/*arm64-v8a*.apk
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+
+      - name: Commit lên nhánh feature/next-track-selector
+        if: ${{ inputs.push_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git checkout -B feature/next-track-selector
+          git add \
+            shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/NextTrackSelector.kt \
+            shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/NextTrackSelectorTest.kt \
+            app/src/main/java/com/music/bitchord/playback/AutoplaySequencer.kt \
+            app/src/main/java/com/music/bitchord/playback/Autoplay.kt \
+            app/src/main/java/com/music/bitchord/playback/PlaybackService.kt
+          git commit -m "Automix: order AutoPlay candidates by tempo, key, energy and vocals (NextTrackSelector)"
+          git add \
+            shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/TransitionRepertoire.kt \
+            shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/TransitionPlanner.kt \
+            shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/TransitionRepertoireTest.kt \
+            shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/AdvancedAutomixPlannerTest.kt \
+            app/src/main/java/com/music/bitchord/playback/CrossfadeController.kt \
+            shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/MixTimeline.kt \
+            shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/OverlapMix.kt \
+            shared/src/commonMain/kotlin/com/music/bitchord/playback/smart/LoopMix.kt \
+            shared/src/commonTest/kotlin/com/music/bitchord/playback/smart/OverlapMixTest.kt \
+            app/src/main/java/com/music/bitchord/playback/loopmix/OverlapMixSession.kt \
+            app/src/main/java/com/music/bitchord/playback/loopmix/LoopMixSession.kt \
+            app/src/main/java/com/music/bitchord/playback/loopmix/LoopMixRenderer.kt \
+            app/src/main/cpp/jni/loopmix_jni.cpp \
+            native/loopmix/loop_mix_renderer.h \
+            native/loopmix/loop_mix_renderer.cpp \
+            native/loopmix/tests/echo_test.cpp
+          git commit -m "Automix: cut repertoire (quick cut, drop cut, echo-out) rendered by the native overlap engine (steps 2+3a)"
+          git push --force-with-lease origin feature/next-track-selector
+
+      - name: Tóm tắt
+        if: ${{ always() }}
+        run: |
+          {
+            echo "### Bước 1+2+3a: NextTrackSelector + TransitionRepertoire + engine overlap native"
+            echo "- Test: ${{ inputs.run_tests }} | APK: ${{ inputs.build_apk }} | Echo cut: ${{ inputs.echo_cut }} | Overlap engine: ${{ inputs.overlap_engine }} | Push nhánh: ${{ inputs.push_branch }}"
+            echo "- Logcat bước 3a: tag BitChordOverlapMix, và dòng \"overlap ...\" của CrossfadeController"
+            echo "- Logcat tag bước 1: BitChordSequencer"
+            echo "- Bước 2: bật Advanced Automix; nhãn Automix trên UI hiện \"cut mix ... quick/drop/echo\" khi dùng kiểu cắt"
+          } >> "$GITHUB_STEP_SUMMARY"
