@@ -1,0 +1,181 @@
+name: Dọn file thừa (chạy 1 lần rồi tự xóa)
+
+# Cách dùng (làm trên điện thoại được):
+#  1. Secret WORKFLOW_PAT đã có sẵn (token classic, tick "repo" và "workflow").
+#     GITHUB_TOKEN mặc định không được sửa .github/workflows nên bắt buộc dùng token này.
+#  2. Chép file này vào .github/workflows/cleanup-repo.yml
+#  3. Actions > "Dọn file thừa" > Run workflow. LẦN ĐẦU ĐỂ dry_run = true, đọc phần Summary,
+#     thấy ổn rồi chạy lại với dry_run = false.
+#
+# Nó dọn gì:
+#  - Trong .github/workflows: các bản tải trùng kiểu "tên (1).yml", "tên (2).yml". Mỗi nhóm
+#    giữ đúng 1 file, là file có commit mới nhất (hòa thì lấy số trong ngoặc lớn nhất).
+#  - Các workflow dọn cũ: cleanup-workflows*.yml.
+#  - (tùy chọn) file lạc chỗ ở ngoài .github/workflows, GitHub không chạy được:
+#    automix-stage1-curves.yml, automix-bpm-key.yml trong thư mục mã nguồn,
+#    bitchord-changed-files.zip.
+#  - Cuối cùng tự xóa chính nó.
+# Nó KHÔNG đụng: android/check/tv/web/... và mọi workflow không có bản trùng
+# (automix-fixes, restore-features, ...). Mọi thứ đã nằm trong lịch sử git, cần thì khôi phục lại.
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Chỉ liệt kê, chưa xóa gì"
+        required: true
+        type: boolean
+        default: true
+      keep_extra:
+        description: "Tên file muốn GIỮ dù là bản trùng (dùng nguyên văn, ngăn cách bằng dấu phẩy)"
+        required: false
+        type: string
+        default: ""
+      include_stray:
+        description: "Xóa luôn file lạc chỗ ngoài .github/workflows"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kiểm tra token
+        env:
+          PAT: ${{ secrets.WORKFLOW_PAT }}
+        run: |
+          if [ -z "$PAT" ]; then
+            echo "::error::Chưa có secret WORKFLOW_PAT (xem hướng dẫn đầu file)."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.WORKFLOW_PAT }}
+          fetch-depth: 0 # cần lịch sử để biết file nào commit mới nhất
+
+      - name: Tìm và xóa file thừa
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          KEEP_EXTRA: ${{ inputs.keep_extra }}
+          INCLUDE_STRAY: ${{ inputs.include_stray }}
+        run: |
+          set -euo pipefail
+          W=".github/workflows"
+          SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
+
+          # ---- Danh sách file được giữ thủ công ----
+          KEEP_LIST=()
+          if [ -n "${KEEP_EXTRA:-}" ]; then
+            while IFS= read -r item; do
+              item="$(printf '%s' "$item" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+              if [ -n "$item" ]; then KEEP_LIST+=("$item"); fi
+            done < <(printf '%s' "$KEEP_EXTRA" | tr ',' '\n')
+          fi
+          is_kept() {
+            local f="$1" k
+            for k in "${KEEP_LIST[@]+"${KEEP_LIST[@]}"}"; do
+              if [ "$k" = "$f" ]; then return 0; fi
+            done
+            return 1
+          }
+
+          DEL=()
+          WHY=()
+          add() { # đường dẫn, lý do (bỏ qua nếu đã có)
+            local p="$1" d
+            for d in "${DEL[@]+"${DEL[@]}"}"; do
+              if [ "$d" = "$p" ]; then return 0; fi
+            done
+            DEL+=("$p")
+            WHY+=("$2")
+          }
+
+          # ---- 1. Bản trùng "tên (N).ext" trong .github/workflows ----
+          declare -A BYBASE
+          for path in "$W"/*; do
+            [ -f "$path" ] || continue
+            name="${path##*/}"
+            base="$(printf '%s' "$name" | sed -E 's/ \([0-9]+\)(\.[^.]*)?$/\1/')"
+            BYBASE["$base"]+="$name"$'\n'
+          done
+
+          for base in "${!BYBASE[@]}"; do
+            mapfile -t members < <(printf '%s' "${BYBASE[$base]}" | sed '/^$/d')
+            [ "${#members[@]}" -gt 1 ] || continue
+            best="$(
+              for m in "${members[@]}"; do
+                ts="$(git log -1 --format=%ct -- "$W/$m" 2>/dev/null || true)"
+                ts="${ts:-0}"
+                n="$(printf '%s' "$m" | sed -nE 's/.* \(([0-9]+)\)(\.[^.]*)?$/\1/p')"
+                n="${n:-0}"
+                printf '%s\t%s\t%s\n' "$ts" "$n" "$m"
+              done | sort -t"$(printf '\t')" -k1,1n -k2,2n | tail -n1 | cut -f3
+            )"
+            for m in "${members[@]}"; do
+              [ "$m" = "$best" ] && continue
+              if is_kept "$m"; then continue; fi
+              add "$W/$m" "bản trùng, giữ '$best'"
+            done
+          done
+
+          # ---- 2. Workflow dọn cũ ----
+          for path in "$W"/cleanup-workflows*.yml; do
+            [ -f "$path" ] || continue
+            add "$path" "workflow dọn cũ"
+          done
+
+          # ---- 3. File lạc chỗ ----
+          if [ "$INCLUDE_STRAY" = "true" ]; then
+            for path in \
+              "automix-stage1-curves.yml" \
+              "shared/src/commonMain/kotlin/com/music/bitchord/automix-bpm-key.yml" \
+              "bitchord-changed-files.zip"; do
+              if [ -f "$path" ]; then add "$path" "file lạc chỗ"; fi
+            done
+          fi
+
+          # ---- Báo cáo ----
+          {
+            echo "### Kết quả (dry_run = $DRY_RUN)"
+            echo
+            if [ "${#DEL[@]}" -eq 0 ]; then
+              echo "Không có file thừa nào."
+            else
+              echo "| File | Lý do | KB |"
+              echo "|---|---|---|"
+              for i in "${!DEL[@]}"; do
+                kb=$(( ($(stat -c %s "${DEL[$i]}") + 1023) / 1024 ))
+                echo "| ${DEL[$i]} | ${WHY[$i]} | $kb |"
+              done
+            fi
+          } | tee -a "$SUMMARY"
+
+          if [ "${#DEL[@]}" -eq 0 ]; then
+            exit 0
+          fi
+          if [ "$DRY_RUN" = "true" ]; then
+            echo "Dry run: chưa xóa gì. Chạy lại với dry_run = false."
+            exit 0
+          fi
+
+          # ---- Xóa thật ----
+          for f in "${DEL[@]}"; do
+            git rm -q -- "$f"
+          done
+
+          # Tự xóa chính nó để lần sau không còn thừa thêm một workflow.
+          SELF="${GITHUB_WORKFLOW_REF#*/*/}"
+          SELF="${SELF%%@*}"
+          if [ -n "$SELF" ] && [ -f "$SELF" ]; then
+            git rm -q -f -- "$SELF" || true
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: dọn ${#DEL[@]} file thừa [skip ci]"
+          git push origin HEAD
