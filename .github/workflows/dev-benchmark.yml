@@ -1,28 +1,70 @@
-name: Dev Benchmark APK
+name: Bit Dev APK
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      BIT_DEV_BUILD: 'true'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-      - uses: gradle/actions/setup-gradle@v4
+          cache: gradle
+
+      - name: Patch (rename, version, updater)
+        env:
+          RUN: ${{ github.run_number }}
+        run: |
+          sed -i 's/com\.dev\.bitchord/com.bit.dev/g; s/BitChord Dev/Bit Dev/g' \
+            app/build.gradle.kts app/src/dev/AndroidManifest.xml wearos/build.gradle.kts tv/build.gradle.kts
+          sed -i '/UPDATE_APK_PREFIX/s/BitChord-/Bit-/' app/build.gradle.kts
+          sed -i 's#repos/[A-Za-z0-9_-]*/[A-Za-z0-9_-]*/releases/latest#repos/${{ github.repository }}/releases/latest#' \
+            app/src/main/java/com/music/bitchord/data/AppUpdateChecker.kt
+          python3 - <<'PY'
+          import os, re
+          run = int(os.environ["RUN"])
+          s = open("build.gradle.kts").read()
+          m = re.search(r'(?:bitchordVersionName"\] = |baseVersion = )"([0-9.]+)"', s)
+          ver = f"{m.group(1)}.{run}"
+          s = re.sub(r'extra\["bitchordVersionCode"\][^\n]*', f'extra["bitchordVersionCode"] = {39 + run}', s)
+          s = re.sub(r'extra\["bitchordVersionName"\] = [^\n]*(\n    if [^\n]*)?',
+                     f'extra["bitchordVersionName"] = "{ver}"', s)
+          open("build.gradle.kts", "w").write(s)
+          open(os.environ["GITHUB_ENV"], "a").write(f"VER={ver}\n")
+          PY
+
+      - name: Setup Secrets (Keystore & local.properties)
+        run: |
+          echo "LASTFM_API_KEY=${{ secrets.LASTFM_API_KEY }}" > local.properties
+          echo "LASTFM_SECRET=${{ secrets.LASTFM_SECRET }}" >> local.properties
+          echo "LISTEN_TOGETHER_SERVER=${{ secrets.LISTEN_TOGETHER_SERVER }}" >> local.properties
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > bitchord-release.jks
+          {
+            echo "storeFile=bitchord-release.jks"
+            echo "storePassword=${{ secrets.KEYSTORE_PASSWORD }}"
+            echo "keyAlias=${{ secrets.KEY_ALIAS }}"
+            echo "keyPassword=${{ secrets.KEY_PASSWORD }}"
+          } > keystore.properties
+
       - run: chmod +x gradlew
-      - run: ./gradlew assembleDevBenchmark
+      - run: ./gradlew assembleDevRelease
 
-      - name: List APKs
-        if: always()
-        run: find . -name "*.apk" -not -path "*/node_modules/*"
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: bitchord-dev-benchmark
-          path: |
-            **/build/outputs/apk/**/*.apk
-          if-no-files-found: error
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          APK=$(ls app/build/outputs/apk/dev/release/*.apk | head -1)
+          cp "$APK" "Bit-v${VER}_arm64-v8a.apk"
+          gh release create "v${VER}" "Bit-v${VER}_arm64-v8a.apk" \
+            --target "$GITHUB_SHA" --title "Bit Dev v${VER}" \
+            --notes "Build #${{ github.run_number }}"
