@@ -1,0 +1,889 @@
+name: Automix - dòng trạng thái loop mix + gom cài đặt (APK)
+
+# Chạy tay: tab Actions -> chọn workflow này -> Run workflow.
+# Một file duy nhất, KHÔNG commit gì vào repo (trừ khi bật "push_branch").
+#
+# NỀN: bản APK thật của bạn (Phong cách mix, Độ mạnh tay, Thời điểm mix, Kiểu nối khi lệch nhịp,
+# Độ rộng loop, Phân tích sâu, nút Mix, màn hình khóa, engine native...) KHÔNG nằm trong main: nó nằm
+# trong patch nhúng của automix-all-in-one (2).yml. Nên workflow này làm 3 việc theo thứ tự:
+#   0. Dựng lại đúng chuỗi đó: đọc file .github/workflows/<chain_file> trong repo và chạy các bước áp patch
+#      của nó (mọi công tắc ở mặc định = bật hết). Nếu main sau này đã chứa sẵn các tính năng đó
+#      (có file AutomixMixStyle.kt) thì bỏ qua bước này.
+#   1. Patch 1 - dòng trạng thái loop mix trên màn hình phát (viết lại cho khớp bản all-in-one).
+#   2. Patch 2A - gom cài đặt Automix (đề xuất 2, phần A): chỉ sắp xếp lại giao diện, KHÔNG đổi hành vi.
+# Cả hai patch là diff dạng chữ thường nằm ngay dưới, đọc và duyệt được từng dòng.
+#
+# Patch 1 làm gì: dòng chữ nhỏ ở chân ảnh bìa, chỉ hiện khi sắp tới lúc chuyển bài (45 giây cuối), KHÔNG
+# cần bật "Stats for nerds" (hiện dưới dòng BPM/key):
+#   - "Loop mix sau 12 giây" / "Đang mix: loop cả hai bài"
+#   - "Không loop: cuối bài này không có đoạn không lời" (hoặc đầu bài sau)
+#   - "Không loop: chưa dò được nhịp", tốc độ phát khác 1x, đang bật bỏ qua đoạn im lặng,
+#     hẹn giờ tắt, bài phân tích từ bản thu khác, thiết bị phát không hỗ trợ, v.v.
+# Chữ có tiếng Việt và tiếng Anh; các ngôn ngữ khác tạm hiện tiếng Anh.
+#
+# Patch 2A làm gì (Cài đặt -> Phát nhạc -> Automix, khi Automix bật):
+#   Công tắc Automix -> Phong cách mix -> Hiệu năng Automix -> "Nâng cao" (gập lại, mặc định đóng).
+#   Trong "Nâng cao": Thời điểm mix, Kiểu nối khi lệch nhịp, Độ rộng của loop mix, Phân tích sâu, Độ mạnh tay.
+#   Tìm kiếm trong Cài đặt vẫn thấy các nút bên trong dù đang gập. Giá trị đã chọn giữ nguyên.
+#   (Phần B: gộp Phân tích sâu vào Hiệu năng cao; phần C: Phong cách mix 3 mức - chưa làm.)
+#
+# File đụng tới: CrossfadeController.kt, AppSettings.kt, AndroidPlayerHost.kt, PlayerHost.kt,
+# PlayerControls.kt, SettingsSheet.kt, hai strings.xml của sharedUi (en, vi), hai strings.xml của app
+# (en, vi) và file mới AutomixVerdict.kt. Đừng chạy chung với workflow automix-* khác: bản này đã chứa sẵn.
+
+on:
+  workflow_dispatch:
+    inputs:
+      chain_file:
+        description: "Tên file workflow trong .github/workflows chứa chuỗi all-in-one cần dựng lại"
+        type: string
+        default: "automix-all-in-one (2).yml"
+      run_tests:
+        description: "Chạy test của module shared trước khi build"
+        type: boolean
+        default: false
+      build_apk:
+        description: "Build APK dev benchmark (R8 + baseline profile, ký bằng khoá debug)"
+        type: boolean
+        default: true
+      push_branch:
+        description: "Đẩy bản đã vá sang nhánh automix-verdict-line (để bạn mở PR). Tắt = không commit gì"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: automix-verdict-line-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verdict-line:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      FIX_BRANCH: automix-verdict-line
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebuild the all-in-one features
+        shell: bash
+        env:
+          CHAIN_FILE: ${{ inputs.chain_file }}
+        run: |
+          set -euo pipefail
+          if [ -f shared/src/commonMain/kotlin/com/music/bitchord/data/settings/AutomixMixStyle.kt ]; then
+            echo "Repo đã chứa sẵn các tính năng all-in-one, bỏ qua bước dựng lại."
+            exit 0
+          fi
+          cat > "$RUNNER_TEMP/replay.py" <<'REPLAY_EOF'
+          import os, re, subprocess, sys
+          
+          try:
+              import yaml
+          except ImportError:
+              subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet", "--break-system-packages", "pyyaml"])
+              import yaml
+          
+          name = os.environ["CHAIN_FILE"]
+          path = os.path.join(".github", "workflows", name)
+          if not os.path.isfile(path):
+              sys.exit(f"::error::Không thấy .github/workflows/{name}. Workflow này cần file đó để dựng lại các tính năng Automix (hoặc để input chain_file đúng tên).")
+          
+          doc = yaml.safe_load(open(path, encoding="utf8"))
+          steps = next(iter(doc["jobs"].values()))["steps"]
+          first = next((i for i, s in enumerate(steps) if s.get("name") == "Apply the combined changes"), None)
+          last = next((i for i, s in enumerate(steps) if str(s.get("uses", "")).startswith("actions/setup-java")), None)
+          if first is None or last is None or last <= first:
+              sys.exit(f"::error::{name} không có cấu trúc như mong đợi (bước 'Apply the combined changes' ... 'Set up JDK'). Gửi lại file đó để mình chỉnh.")
+          
+          todo = [s for s in steps[first:last] if s.get("run")]
+          print(f"Dựng lại {len(todo)} bước từ {name}")
+          for s in todo:
+              run = s["run"]
+              # Mọi công tắc của workflow gốc chạy ở giá trị mặc định (tất cả bật).
+              run = re.sub(r"\$\{\{\s*inputs\.\w+(\s*&&\s*inputs\.\w+)*\s*\}\}", "true", run)
+              if "$" + "{{" in run:
+                  sys.exit(f"::error::Bước '{s.get('name')}' còn biểu thức GitHub chưa xử lý được.")
+              print(f"::group::{s.get('name')}", flush=True)
+              r = subprocess.run(["bash", "-eo", "pipefail", "-c", run])
+              print("::endgroup::", flush=True)
+              if r.returncode != 0:
+                  sys.exit(f"::error::Bước '{s.get('name')}' của {name} lỗi (mã {r.returncode}).")
+          print("Đã dựng xong bản all-in-one.")
+          REPLAY_EOF
+          python3 "$RUNNER_TEMP/replay.py"
+
+      - name: Write the patches
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/1-verdict-line.patch" <<'PATCH_EOF'
+          diff --git a/app/src/main/java/com/music/bitchord/data/settings/AppSettings.kt b/app/src/main/java/com/music/bitchord/data/settings/AppSettings.kt
+          index 46e620e..70e460c 100644
+          --- a/app/src/main/java/com/music/bitchord/data/settings/AppSettings.kt
+          +++ b/app/src/main/java/com/music/bitchord/data/settings/AppSettings.kt
+          @@ -899,6 +899,14 @@ object AppSettings {
+                */
+               val automixDetail = MutableStateFlow<String?>(null)
+           
+          +    /**
+          +     * Automix's short, listener-facing line about the next song change: that a
+          +     * loop mix is coming, or why the pair gets none. Published by the crossfade
+          +     * controller once the change is near; null the rest of the time and while
+          +     * Automix is off.
+          +     */
+          +    val automixVerdict = MutableStateFlow<AutomixVerdict?>(null)
+          +
+               /**
+                * Where on the *playing* track the next transition is planned to happen, as
+                * fractions of its duration, or null when there is nothing worth drawing.
+          diff --git a/app/src/main/java/com/music/bitchord/playback/CrossfadeController.kt b/app/src/main/java/com/music/bitchord/playback/CrossfadeController.kt
+          index 01c99b1..df3c474 100644
+          --- a/app/src/main/java/com/music/bitchord/playback/CrossfadeController.kt
+          +++ b/app/src/main/java/com/music/bitchord/playback/CrossfadeController.kt
+          @@ -11,6 +11,7 @@ import androidx.media3.common.util.UnstableApi
+           import androidx.media3.exoplayer.ExoPlayer
+           import com.music.bitchord.data.listentogether.ListenTogether
+           import com.music.bitchord.data.settings.AppSettings
+          +import com.music.bitchord.data.settings.AutomixVerdict
+           import com.music.bitchord.data.settings.MixBlend
+           import com.music.bitchord.data.settings.MixDeck
+           import com.music.bitchord.data.settings.MixTransitionView
+          @@ -2274,6 +2275,13 @@ class CrossfadeController(
+           
+               /** Why the pair gets no loop mix, for the log and the stats line; null when it does. */
+               private var loopRefusal: String? = null
+          +
+          +    /** The same refusal as [AutomixVerdict], and the pair it was reached for; null when the pair gets a loop mix. */
+          +    private var loopRefusalKind: AutomixVerdict.Kind? = null
+          +    private var loopRefusalPair: String? = null
+          +
+          +    /** A reason a pair can't be a loop mix: the log's words, and the player's kind. */
+          +    private class LoopRefusal(val text: String, val kind: AutomixVerdict.Kind)
+               private var lastLoopVerdict = ""
+               private var loopIncomingStarted = false
+               private var lastLoopPositionMs = -1L
+          @@ -2306,15 +2314,17 @@ class CrossfadeController(
+               }
+           
+               /** Why [current] -> [next] can't be a loop mix right now, or null when it can. */
+          -    private fun loopRefusalFor(player: ExoPlayer, current: MediaItem, next: MediaItem, state: SmartAnalysis): String? = when {
+          -        !LoopMixRenderer.available -> "no renderer"
+          -        AppSettings.playbackSpeed.value != 1f -> "playback speed is not 1x"
+          -        player.skipSilenceEnabled -> "skip silence is on"
+          -        SleepTimer.afterTrack.value -> "sleep timer"
+          -        state.current != TrackAnalysisState.ANALYSED || state.next != TrackAnalysisState.ANALYSED -> "waiting on analysis"
+          -        isSourceBacked(current) || isSourceBacked(next) -> "analysed off another recording"
+          -        loopPortOf(player)?.supportsLoopMix != true -> "this output can't take it"
+          -        loopPortOf(standby()) == null -> "no standby sink"
+          +    private fun loopRefusalFor(player: ExoPlayer, current: MediaItem, next: MediaItem, state: SmartAnalysis): LoopRefusal? = when {
+          +        !LoopMixRenderer.available -> LoopRefusal("no renderer", AutomixVerdict.Kind.UNAVAILABLE)
+          +        AppSettings.playbackSpeed.value != 1f -> LoopRefusal("playback speed is not 1x", AutomixVerdict.Kind.SPEED)
+          +        player.skipSilenceEnabled -> LoopRefusal("skip silence is on", AutomixVerdict.Kind.SKIP_SILENCE)
+          +        SleepTimer.afterTrack.value -> LoopRefusal("sleep timer", AutomixVerdict.Kind.SLEEP_TIMER)
+          +        state.current != TrackAnalysisState.ANALYSED || state.next != TrackAnalysisState.ANALYSED ->
+          +            LoopRefusal("waiting on analysis", AutomixVerdict.Kind.ANALYSING)
+          +        isSourceBacked(current) || isSourceBacked(next) ->
+          +            LoopRefusal("analysed off another recording", AutomixVerdict.Kind.SOURCE)
+          +        loopPortOf(player)?.supportsLoopMix != true -> LoopRefusal("this output can't take it", AutomixVerdict.Kind.OUTPUT)
+          +        loopPortOf(standby()) == null -> LoopRefusal("no standby sink", AutomixVerdict.Kind.OUTPUT)
+                   else -> null
+               }
+           
+          @@ -2339,8 +2349,8 @@ class CrossfadeController(
+                   state: SmartAnalysis,
+               ): LoopMix.Plan? {
+                   val pair = "${current.mediaId}->${next.mediaId}"
+          -        loopRefusalFor(player, current, next, state)?.let { why ->
+          -            noteLoopVerdict(pair, null, why)
+          +        loopRefusalFor(player, current, next, state)?.let { refusal ->
+          +            noteLoopVerdict(pair, null, refusal.text, refusal.kind)
+                       return null
+                   }
+                   askLyrics(current, durationMs)
+          @@ -2348,7 +2358,7 @@ class CrossfadeController(
+                   val outLyrics = lyricSpans[current.mediaId]
+                   val inLyrics = lyricSpans[next.mediaId]
+                   if (outLyrics == null || inLyrics == null) {
+          -            noteLoopVerdict(pair, null, "waiting on lyrics")
+          +            noteLoopVerdict(pair, null, "waiting on lyrics", AutomixVerdict.Kind.WAITING_LYRICS)
+                       return null
+                   }
+                   val reach = AppSettings.loopMixReach.value
+          @@ -2374,12 +2384,27 @@ class CrossfadeController(
+                   loopPlanKey = key
+                   loopPlanned = plan
+                   val lyricsNote = "lyrics ${if (outLyrics.spans != null) "out" else "-"}/${if (inLyrics.spans != null) "in" else "-"}"
+          -        noteLoopVerdict(pair, plan, if (plan == null) "$why; $lyricsNote" else null)
+          +        // [LoopMix.plan] words its reason; the side it names says which song has no clean bars.
+          +        val kind = when {
+          +            why.startsWith("outgoing") -> AutomixVerdict.Kind.NO_INSTRUMENTAL_OUT
+          +            why.startsWith("incoming") -> AutomixVerdict.Kind.NO_INSTRUMENTAL_IN
+          +            why.startsWith("no grid") -> AutomixVerdict.Kind.NO_GRID
+          +            why.startsWith("a music video") -> AutomixVerdict.Kind.VIDEO
+          +            else -> AutomixVerdict.Kind.UNKNOWN
+          +        }
+          +        noteLoopVerdict(pair, plan, if (plan == null) "$why; $lyricsNote" else null, kind)
+                   return plan
+               }
+           
+          -    private fun noteLoopVerdict(pair: String, plan: LoopMix.Plan?, refusal: String?) {
+          +    private fun noteLoopVerdict(
+          +        pair: String,
+          +        plan: LoopMix.Plan?,
+          +        refusal: String?,
+          +        kind: AutomixVerdict.Kind = AutomixVerdict.Kind.UNKNOWN,
+          +    ) {
+                   loopRefusal = refusal
+          +        loopRefusalKind = if (refusal == null) null else kind
+          +        loopRefusalPair = pair
+                   val verdict = "$pair: " + (plan?.let { "loop mix at ${"%.2f".format(Locale.ROOT, it.out.loopStart)}s · ${describeLoop(it)}" } ?: "no loop mix ($refusal)")
+                   if (verdict == lastLoopVerdict) return
+                   lastLoopVerdict = verdict
+          @@ -2921,6 +2946,7 @@ class CrossfadeController(
+                   loopPlanned = null
+                   loopRefusal = reason
+                   overlapBlockedPair = overlapActivePair
+          +        loopRefusalKind = AutomixVerdict.Kind.FELL_BACK
+                   loopBail(reason, settle = false)
+               }
+           
+          @@ -2949,6 +2975,40 @@ class CrossfadeController(
+                       else -> describeAutomix(player, item)
+                   }
+                   if (AppSettings.automixDetail.value != text) AppSettings.automixDetail.value = text
+          +        val verdict = if (text == null || item == null) null else automixVerdictFor(player, item)
+          +        if (AppSettings.automixVerdict.value != verdict) AppSettings.automixVerdict.value = verdict
+          +    }
+          +
+          +    /**
+          +     * What the player says about the next song change: the loop mix counting
+          +     * down or running, or why this pair gets none. Held back until the change
+          +     * is within [VERDICT_LEAD_SECONDS], so it never sits on the player for a
+          +     * whole song.
+          +     */
+          +    private fun automixVerdictFor(player: ExoPlayer, item: MediaItem): AutomixVerdict? {
+          +        val session = loopSession
+          +        if (session != null) {
+          +            val m = session.mixSeconds(System.nanoTime(), outgoing?.isPlaying ?: false)
+          +            return if (m == null || m < 0) {
+          +                val seconds = ceil(-(m ?: -LOOP_ARM_LEAD_MS / 1000.0)).toInt().coerceAtLeast(0)
+          +                AutomixVerdict(AutomixVerdict.Kind.LOOP_IN, seconds)
+          +            } else {
+          +                AutomixVerdict(AutomixVerdict.Kind.LOOPING)
+          +            }
+          +        }
+          +        val nextIndex = player.nextMediaItemIndex
+          +        if (nextIndex == C.INDEX_UNSET) return null
+          +        val pair = "${item.mediaId}->${player.getMediaItemAt(nextIndex).mediaId}"
+          +        val planned = loopPlanned
+          +        if (planned != null && loopPlanKey?.startsWith("$pair|") == true) {
+          +            val seconds = (planned.out.loopStart - player.currentPosition / 1000.0).coerceAtLeast(0.0)
+          +            return if (seconds <= VERDICT_LEAD_SECONDS) AutomixVerdict(AutomixVerdict.Kind.LOOP_IN, ceil(seconds).toInt()) else null
+          +        }
+          +        val kind = loopRefusalKind ?: return null
+          +        if (loopRefusalPair != pair) return null
+          +        val duration = player.duration
+          +        if (duration == C.TIME_UNSET || duration <= 0L) return null
+          +        return if ((duration - player.currentPosition) / 1000.0 <= VERDICT_LEAD_SECONDS) AutomixVerdict(kind) else null
+               }
+           
+               private fun describeAutomix(player: ExoPlayer, item: MediaItem): String {
+          @@ -4362,6 +4422,9 @@ class CrossfadeController(
+           
+                   /** The loop mix's setup: how far ahead its loop must start, and when its decks start building. */
+                   const val LOOP_SETUP_SECONDS = 15.0
+          +
+          +        /** How close to the song change the player starts saying what Automix will do there. */
+          +        const val VERDICT_LEAD_SECONDS = 45.0
+                   const val LOOP_ARM_LEAD_MS = 12_000L
+                   const val LOOP_MIN_LEAD_MS = 9_000L
+           
+          diff --git a/app/src/main/java/com/music/bitchord/ui/player/AndroidPlayerHost.kt b/app/src/main/java/com/music/bitchord/ui/player/AndroidPlayerHost.kt
+          index 5ced3e8..1f1fee7 100644
+          --- a/app/src/main/java/com/music/bitchord/ui/player/AndroidPlayerHost.kt
+          +++ b/app/src/main/java/com/music/bitchord/ui/player/AndroidPlayerHost.kt
+          @@ -90,6 +90,7 @@ class AndroidPlayerHost(context: Context) : PlayerHost {
+                   override val showListenTogetherButton get() = AppSettings.showListenTogetherButton
+                   override val smartAnalysis get() = AppSettings.smartAnalysis
+                   override val automixDetail get() = AppSettings.automixDetail
+          +        override val automixVerdict get() = AppSettings.automixVerdict
+                   override val smartFadeEnabled get() = AppSettings.smartFadeEnabled
+                   override val smartMixBars get() = AppSettings.smartMixBars
+                   override val smartMixStyle get() = AppSettings.smartMixStyle
+          diff --git a/shared/src/commonMain/kotlin/com/music/bitchord/data/settings/AutomixVerdict.kt b/shared/src/commonMain/kotlin/com/music/bitchord/data/settings/AutomixVerdict.kt
+          new file mode 100644
+          index 0000000..bbd21e4
+          --- /dev/null
+          +++ b/shared/src/commonMain/kotlin/com/music/bitchord/data/settings/AutomixVerdict.kt
+          @@ -0,0 +1,61 @@
+          +package com.music.bitchord.data.settings
+          +
+          +/**
+          + * What Automix will do (or why it won't loop) at the next song change, in a
+          + * form the player can word for a listener: a [kind] the UI turns into a
+          + * sentence, and [seconds] for the kinds that count down.
+          + *
+          + * Published by the crossfade controller only once the change is close, so
+          + * the line never sits on the player for a whole song.
+          + */
+          +data class AutomixVerdict(val kind: Kind, val seconds: Int = 0) {
+          +    enum class Kind {
+          +        /** A loop mix is planned (or its decks are being built): [seconds] until it starts. */
+          +        LOOP_IN,
+          +
+          +        /** The loop mix is playing. */
+          +        LOOPING,
+          +
+          +        /** Waiting for either song's analysis. */
+          +        ANALYSING,
+          +
+          +        /** Waiting for synced lyrics, which say where the voices are. */
+          +        WAITING_LYRICS,
+          +
+          +        /** No bar at the end of this song is free of singing. */
+          +        NO_INSTRUMENTAL_OUT,
+          +
+          +        /** No bar at the start of the next song is free of singing. */
+          +        NO_INSTRUMENTAL_IN,
+          +
+          +        /** One of the songs has no usable beat grid there. */
+          +        NO_GRID,
+          +
+          +        /** A music video: its audio rarely matches what its lyrics are timed to. */
+          +        VIDEO,
+          +
+          +        /** The native renderer didn't load on this device. */
+          +        UNAVAILABLE,
+          +
+          +        /** Playback speed is not 1x. */
+          +        SPEED,
+          +
+          +        /** Skip silence is on. */
+          +        SKIP_SILENCE,
+          +
+          +        /** The sleep timer stops after this song. */
+          +        SLEEP_TIMER,
+          +
+          +        /** The analysis was read off another recording than the one that plays. */
+          +        SOURCE,
+          +
+          +        /** This audio output can't take the loop mix. */
+          +        OUTPUT,
+          +
+          +        /** A loop mix was planned but couldn't start; the pair takes a normal blend. */
+          +        FELL_BACK,
+          +
+          +        /** Anything else. */
+          +        UNKNOWN,
+          +    }
+          +}
+          diff --git a/sharedUi/src/commonMain/composeResources/values-vi/strings.xml b/sharedUi/src/commonMain/composeResources/values-vi/strings.xml
+          index 3d5d40f..a64a237 100644
+          --- a/sharedUi/src/commonMain/composeResources/values-vi/strings.xml
+          +++ b/sharedUi/src/commonMain/composeResources/values-vi/strings.xml
+          @@ -9,6 +9,22 @@
+               <string name="automix_analysis_status">Automix · bài này: %1$s · tiếp theo: %2$s</string>
+               <string name="automix_not_supported_video">Automix không được hỗ trợ trên các bài hát dạng video</string>
+               <string name="automix_stopped_in_party">Automix: đã dừng trong Listen together</string>
+          +    <string name="automix_verdict_loop_in">Loop mix sau %1$d giây</string>
+          +    <string name="automix_verdict_looping">Đang mix: loop cả hai bài</string>
+          +    <string name="automix_verdict_analysing">Đang phân tích trước khi mix…</string>
+          +    <string name="automix_verdict_waiting_lyrics">Đang kiểm tra lời để tìm đoạn không lời…</string>
+          +    <string name="automix_verdict_no_loop_out">Không loop: cuối bài này không có đoạn không lời</string>
+          +    <string name="automix_verdict_no_loop_in">Không loop: đầu bài sau không có đoạn không lời</string>
+          +    <string name="automix_verdict_no_grid">Không loop: chưa dò được nhịp</string>
+          +    <string name="automix_verdict_video">Không loop: bài dạng video</string>
+          +    <string name="automix_verdict_unavailable">Không loop: thiết bị này không hỗ trợ loop mix</string>
+          +    <string name="automix_verdict_speed">Không loop: tốc độ phát khác 1×</string>
+          +    <string name="automix_verdict_skip_silence">Không loop: đang bật bỏ qua đoạn im lặng</string>
+          +    <string name="automix_verdict_sleep_timer">Không loop: hẹn giờ sẽ tắt sau bài này</string>
+          +    <string name="automix_verdict_source">Không loop: bài này được phân tích từ bản thu khác</string>
+          +    <string name="automix_verdict_output">Không loop: thiết bị phát hiện tại không hỗ trợ</string>
+          +    <string name="automix_verdict_fell_back">Loop mix không khởi động được, dùng blend thường</string>
+          +    <string name="automix_verdict_unknown">Không loop cho cặp bài này</string>
+               <string name="autoplay">Tự động phát (AutoPlay)</string>
+               <string name="autoplay_empty_description">Nhạc tương tự sẽ tiếp tục được phát</string>
+               <string name="autoplay_off">Tắt tự động phát</string>
+          diff --git a/sharedUi/src/commonMain/composeResources/values/strings.xml b/sharedUi/src/commonMain/composeResources/values/strings.xml
+          index 673b6e5..bc936d6 100644
+          --- a/sharedUi/src/commonMain/composeResources/values/strings.xml
+          +++ b/sharedUi/src/commonMain/composeResources/values/strings.xml
+          @@ -9,6 +9,22 @@
+               <string name="automix_analysis_status">Automix · this song: %1$s · next: %2$s</string>
+               <string name="automix_not_supported_video">Automix not supported on video songs</string>
+               <string name="automix_stopped_in_party">Automix: stopped in listen together</string>
+          +    <string name="automix_verdict_loop_in">Loop mix in %1$d s</string>
+          +    <string name="automix_verdict_looping">Mixing: looping both songs</string>
+          +    <string name="automix_verdict_analysing">Analysing before the mix…</string>
+          +    <string name="automix_verdict_waiting_lyrics">Checking lyrics for a vocal-free part…</string>
+          +    <string name="automix_verdict_no_loop_out">No loop: no vocal-free bars at the end of this song</string>
+          +    <string name="automix_verdict_no_loop_in">No loop: no vocal-free bars at the start of the next song</string>
+          +    <string name="automix_verdict_no_grid">No loop: couldn’t find the beat</string>
+          +    <string name="automix_verdict_video">No loop: video songs aren’t looped</string>
+          +    <string name="automix_verdict_unavailable">No loop: loop mix isn’t available on this device</string>
+          +    <string name="automix_verdict_speed">No loop: playback speed isn’t 1×</string>
+          +    <string name="automix_verdict_skip_silence">No loop: Skip silence is on</string>
+          +    <string name="automix_verdict_sleep_timer">No loop: the sleep timer stops after this song</string>
+          +    <string name="automix_verdict_source">No loop: this song was analysed from another recording</string>
+          +    <string name="automix_verdict_output">No loop: this audio output can’t play it</string>
+          +    <string name="automix_verdict_fell_back">Loop mix couldn’t start, using a normal blend</string>
+          +    <string name="automix_verdict_unknown">No loop for this pair</string>
+               <string name="autoplay">AutoPlay</string>
+               <string name="autoplay_empty_description">Similar music will keep playing</string>
+               <string name="autoplay_off">AutoPlay off</string>
+          diff --git a/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/player/PlayerControls.kt b/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/player/PlayerControls.kt
+          index 3e0f78f..42dfe2f 100644
+          --- a/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/player/PlayerControls.kt
+          +++ b/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/player/PlayerControls.kt
+          @@ -122,6 +122,7 @@ import com.music.bitchord.data.NerdStats
+           import com.music.bitchord.data.listentogether.PartyMember
+           import com.music.bitchord.data.settings.TrackAnalysisState
+           import com.music.bitchord.data.settings.AudioQuality
+          +import com.music.bitchord.data.settings.AutomixVerdict
+           import com.music.bitchord.data.model.Song
+           import java.util.Locale
+           import java.util.concurrent.TimeUnit
+          @@ -371,7 +372,8 @@ internal fun PlaybackQualityLabel(
+            * Stats for nerds, on the foot of the sleeve: the measured stream, and under
+            * it what Automix's analysis is doing. Those lines are nothing at all while the
+            * setting is off. The song's BPM and key are the exception: they show whenever
+          - * Automix has measured them, with or without stats for nerds.
+          + * Automix has measured them, with or without stats for nerds. So does the short
+          + * line about the next song change (see [AutomixVerdictLine]), under them.
+            */
+           @Composable
+           internal fun SleeveNerdStats(song: Song, modifier: Modifier = Modifier) {
+          @@ -407,7 +409,12 @@ internal fun SleeveNerdStats(song: Song, modifier: Modifier = Modifier) {
+               } else {
+                   null
+               }
+          -    if (!showNerdStats && tempoKeyText == null) return
+          +    if (!showNerdStats && tempoKeyText == null) {
+          +        // Nothing measured to show, but the next song change may still have
+          +        // something to say.
+          +        AutomixVerdictLine(song, modifier)
+          +        return
+          +    }
+               // A plain white line reads fine over the usual dark tile, but a light
+               // stretch of an animated cover — sky, snow, a pale sleeve — washes it out
+               // entirely. The shadow costs nothing on a dark background and is what
+          @@ -447,6 +454,9 @@ internal fun SleeveNerdStats(song: Song, modifier: Modifier = Modifier) {
+                           textAlign = TextAlign.Center,
+                       )
+                   }
+          +        // Stats for nerds carries the same facts in technical words (the
+          +        // detail line below), so this plain-language line is for the rest.
+          +        if (!showNerdStats) AutomixVerdictLine(song)
+                   // Only when Automix is actually switched on: otherwise this would
+                   // report on analysis nothing is going to use, which is noise rather
+                   // than a stat.
+          @@ -487,6 +497,56 @@ internal fun SleeveNerdStats(song: Song, modifier: Modifier = Modifier) {
+               }
+           }
+           
+          +/**
+          + * One plain sentence about the next song change, near it: that a loop mix is
+          + * coming, or why the pair gets none. The controller publishes nothing until
+          + * the change is close, and nothing while Automix is off or in a party, so
+          + * this is empty most of the song. The stats-for-nerds line carries the same
+          + * facts in technical words, so that mode doesn't show this one.
+          + */
+          +@Composable
+          +private fun AutomixVerdictLine(song: Song, modifier: Modifier = Modifier) {
+          +    val smartFadeOn by PlayerSettings.smartFadeEnabled.collectAsStateWithLifecycle()
+          +    val verdict by PlayerSettings.automixVerdict.collectAsStateWithLifecycle()
+          +    val shown = verdict
+          +    if (!smartFadeOn || shown == null || song.isVideoOrigin) return
+          +    val text = when (shown.kind) {
+          +        AutomixVerdict.Kind.LOOP_IN -> stringResource(Res.string.automix_verdict_loop_in, shown.seconds)
+          +        AutomixVerdict.Kind.LOOPING -> stringResource(Res.string.automix_verdict_looping)
+          +        AutomixVerdict.Kind.ANALYSING -> stringResource(Res.string.automix_verdict_analysing)
+          +        AutomixVerdict.Kind.WAITING_LYRICS -> stringResource(Res.string.automix_verdict_waiting_lyrics)
+          +        AutomixVerdict.Kind.NO_INSTRUMENTAL_OUT -> stringResource(Res.string.automix_verdict_no_loop_out)
+          +        AutomixVerdict.Kind.NO_INSTRUMENTAL_IN -> stringResource(Res.string.automix_verdict_no_loop_in)
+          +        AutomixVerdict.Kind.NO_GRID -> stringResource(Res.string.automix_verdict_no_grid)
+          +        AutomixVerdict.Kind.VIDEO -> stringResource(Res.string.automix_verdict_video)
+          +        AutomixVerdict.Kind.UNAVAILABLE -> stringResource(Res.string.automix_verdict_unavailable)
+          +        AutomixVerdict.Kind.SPEED -> stringResource(Res.string.automix_verdict_speed)
+          +        AutomixVerdict.Kind.SKIP_SILENCE -> stringResource(Res.string.automix_verdict_skip_silence)
+          +        AutomixVerdict.Kind.SLEEP_TIMER -> stringResource(Res.string.automix_verdict_sleep_timer)
+          +        AutomixVerdict.Kind.SOURCE -> stringResource(Res.string.automix_verdict_source)
+          +        AutomixVerdict.Kind.OUTPUT -> stringResource(Res.string.automix_verdict_output)
+          +        AutomixVerdict.Kind.FELL_BACK -> stringResource(Res.string.automix_verdict_fell_back)
+          +        AutomixVerdict.Kind.UNKNOWN -> stringResource(Res.string.automix_verdict_unknown)
+          +    }
+          +    Text(
+          +        text = text,
+          +        // The same shadowed small type as the stats, for the same reason: a
+          +        // pale stretch of an animated cover would wash a plain line out.
+          +        style = MaterialTheme.typography.labelSmall.copy(
+          +            shadow = Shadow(
+          +                color = Color.Black.copy(alpha = 0.55f),
+          +                offset = Offset(0f, 1f),
+          +                blurRadius = 4f,
+          +            ),
+          +        ),
+          +        color = Color.White.copy(alpha = 0.75f),
+          +        maxLines = 2,
+          +        overflow = TextOverflow.Ellipsis,
+          +        textAlign = TextAlign.Center,
+          +        modifier = modifier,
+          +    )
+          +}
+          +
+           /**
+            * Previous, play/pause, next.
+            *
+          diff --git a/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/player/PlayerHost.kt b/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/player/PlayerHost.kt
+          index f336a3f..e5eeb04 100644
+          --- a/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/player/PlayerHost.kt
+          +++ b/sharedUi/src/jvmSharedMain/kotlin/com/music/bitchord/ui/player/PlayerHost.kt
+          @@ -10,6 +10,7 @@ import com.music.bitchord.data.lyrics.LyricLine
+           import com.music.bitchord.data.lyrics.LyricsSource
+           import com.music.bitchord.data.model.Song
+           import com.music.bitchord.data.settings.AudioQuality
+          +import com.music.bitchord.data.settings.AutomixVerdict
+           import com.music.bitchord.data.settings.LastPlayerScreen
+           import com.music.bitchord.data.settings.PlayerTheme
+           import com.music.bitchord.data.settings.SmartAnalysis
+          @@ -272,6 +273,12 @@ interface PlayerSettingsSource {
+                * there is nothing to say beyond [smartAnalysis].
+                */
+               val automixDetail: StateFlow<String?>
+          +    /**
+          +     * What Automix will do at the next song change, in a form the player words
+          +     * for the listener (a loop mix coming, or why there is none); null until
+          +     * the change is near.
+          +     */
+          +    val automixVerdict: StateFlow<AutomixVerdict?>
+               val smartFadeEnabled: StateFlow<Boolean>
+               /** Mix length for every transition: 0 lets Automix decide, 8 or 16 fixes it in bars. */
+               val smartMixBars: StateFlow<Int>
+          PATCH_EOF
+          cat > "$RUNNER_TEMP/2-settings-advanced.patch" <<'PATCH_EOF'
+          diff --git a/app/src/main/java/com/music/bitchord/ui/screens/SettingsSheet.kt b/app/src/main/java/com/music/bitchord/ui/screens/SettingsSheet.kt
+          index 2cc7762..4bf3889 100644
+          --- a/app/src/main/java/com/music/bitchord/ui/screens/SettingsSheet.kt
+          +++ b/app/src/main/java/com/music/bitchord/ui/screens/SettingsSheet.kt
+          @@ -307,6 +307,9 @@ fun SettingsScreen(
+               var pickingAutomixGesture by remember { mutableStateOf(false) }
+               var pickingLoopReach by remember { mutableStateOf(false) }
+               var pickingMixProfile by remember { mutableStateOf(false) }
+          +    // Whether the advanced Automix rows are unfolded. Folded by default: the
+          +    // taste and performance rows above them are all most people ever touch.
+          +    var automixAdvancedOpen by rememberSaveable { mutableStateOf(false) }
+               var pickingVisualEffect by remember { mutableStateOf(false) }
+               val localMusicFolderUri by AppSettings.localMusicFolderUri.collectAsStateWithLifecycle()
+               val highPerformanceMode by AppSettings.highPerformanceMode.collectAsStateWithLifecycle()
+          @@ -822,6 +825,19 @@ fun SettingsScreen(
+                               )
+                           }
+                       }
+          +            // The one knob most people want: how Automix likes to mix.
+          +            if (smartFade) {
+          +                val mixProfileTitle = stringResource(R.string.mix_profile)
+          +                row(mixProfileTitle, "profile", "chill", "club", "radio", "dj", "style", "taste") {
+          +                    SettingsRow(
+          +                        icon = Icons.Rounded.Tune,
+          +                        title = mixProfileTitle,
+          +                        subtitle = stringResource(R.string.mix_profile_subtitle),
+          +                        value = mixProfile.localizedLabel(),
+          +                        onClick = { pickingMixProfile = true },
+          +                    )
+          +                }
+          +            }
+                       val automixPerformanceTitle = stringResource(R.string.automix_performance)
+                       row(automixPerformanceTitle, "cpu", "battery") {
+                           BypassedByBitPerfect(bitPerfectReady) {
+          @@ -834,83 +850,88 @@ fun SettingsScreen(
+                               )
+                           }
+                       }
+          -            // Only meaningful while Automix is on: both pick how its transitions are
+          -            // planned, and nothing is planned with it off.
+          +            // Everything else that shapes how transitions are planned, folded away.
+          +            // Only meaningful while Automix is on: nothing is planned with it off.
+                       if (smartFade) {
+          -                val automixStyleTitle = stringResource(R.string.automix_mix_style)
+          -                row(automixStyleTitle, "phrase", "bars", "length", "transition", "mix", "algorithm") {
+          -                    SettingsRow(
+          -                        icon = Icons.Rounded.Waves,
+          -                        title = automixStyleTitle,
+          -                        subtitle = stringResource(R.string.automix_mix_style_subtitle),
+          -                        value = automixMixStyle.localizedLabel(),
+          -                        onClick = { pickingAutomixStyle = true },
+          -                    )
+          -                }
+          -                val automixGestureTitle = stringResource(R.string.automix_gesture)
+          -                row(automixGestureTitle, "filter", "sweep", "echo", "bass", "transition", "mix", "algorithm") {
+          -                    SettingsRow(
+          -                        icon = Icons.Rounded.Tune,
+          -                        title = automixGestureTitle,
+          -                        subtitle = stringResource(R.string.automix_gesture_subtitle),
+          -                        value = automixGesture.localizedLabel(),
+          -                        onClick = { pickingAutomixGesture = true },
+          -                    )
+          -                }
+          -                val loopReachTitle = stringResource(R.string.loop_reach)
+          -                row(loopReachTitle, "loop", "instrumental", "vocal", "dj", "transition", "mix", "algorithm") {
+          -                    SettingsRow(
+          -                        icon = Icons.Rounded.Waves,
+          -                        title = loopReachTitle,
+          -                        subtitle = stringResource(R.string.loop_reach_subtitle),
+          -                        value = loopMixReach.localizedLabel(),
+          -                        onClick = { pickingLoopReach = true },
+          -                    )
+          -                }
+          -                val deepAnalysisTitle = stringResource(R.string.deep_analysis)
+          -                row(deepAnalysisTitle, "analysis", "windows", "loop", "cpu", "battery", "mix", "algorithm") {
+          -                    SettingsRow(
+          -                        icon = Icons.Rounded.Tune,
+          -                        title = deepAnalysisTitle,
+          -                        subtitle = stringResource(R.string.deep_analysis_subtitle),
+          -                        trailing = {
+          -                            IosSwitch(
+          -                                checked = deepAnalysis,
+          -                                onCheckedChange = AppSettings::setDeepAnalysis,
+          -                            )
+          -                        },
+          -                        onClick = { AppSettings.setDeepAnalysis(!deepAnalysis) },
+          -                    )
+          -                }
+          -                val mixProfileTitle = stringResource(R.string.mix_profile)
+          -                row(mixProfileTitle, "profile", "chill", "club", "radio", "dj", "style", "taste") {
+          +                val automixAdvancedTitle = stringResource(R.string.automix_advanced)
+          +                row(automixAdvancedTitle, "advanced", "more", "options", "nâng cao", "mix", "algorithm") {
+                               SettingsRow(
+                                   icon = Icons.Rounded.Tune,
+          -                        title = mixProfileTitle,
+          -                        subtitle = stringResource(R.string.mix_profile_subtitle),
+          -                        value = mixProfile.localizedLabel(),
+          -                        onClick = { pickingMixProfile = true },
+          -                    )
+          -                }
+          -                val mixIntensityTitle = stringResource(R.string.mix_intensity)
+          -                row(mixIntensityTitle, "punchy", "gentle", "intensity", "dj", "mix") {
+          -                    SliderRow(
+          -                        icon = Icons.Rounded.Waves,
+          -                        title = mixIntensityTitle,
+          -                        subtitle = stringResource(R.string.mix_intensity_subtitle),
+          +                        title = automixAdvancedTitle,
+          +                        subtitle = stringResource(R.string.automix_advanced_subtitle),
+                                   value = stringResource(
+          -                            when {
+          -                                mixIntensity < 35 -> R.string.mix_intensity_gentle
+          -                                mixIntensity > 65 -> R.string.mix_intensity_punchy
+          -                                else -> R.string.mix_intensity_normal
+          -                            },
+          +                            if (automixAdvancedOpen) R.string.automix_advanced_hide else R.string.automix_advanced_show,
+                                   ),
+          -                        sliderValue = mixIntensity.toFloat(),
+          -                        onSliderValue = { AppSettings.setMixIntensity(it.roundToInt()) },
+          -                        valueRange = 0f..100f,
+          -                        steps = 9,
+          +                        onClick = { automixAdvancedOpen = !automixAdvancedOpen },
+                               )
+                           }
+          +                // A search has to be able to find the rows inside, folded or not.
+          +                if (automixAdvancedOpen || searching) {
+          +                    val automixStyleTitle = stringResource(R.string.automix_mix_style)
+          +                    row(automixStyleTitle, "phrase", "bars", "length", "transition", "mix", "algorithm") {
+          +                        SettingsRow(
+          +                            icon = Icons.Rounded.Waves,
+          +                            title = automixStyleTitle,
+          +                            subtitle = stringResource(R.string.automix_mix_style_subtitle),
+          +                            value = automixMixStyle.localizedLabel(),
+          +                            onClick = { pickingAutomixStyle = true },
+          +                        )
+          +                    }
+          +                    val automixGestureTitle = stringResource(R.string.automix_gesture)
+          +                    row(automixGestureTitle, "filter", "sweep", "echo", "bass", "transition", "mix", "algorithm") {
+          +                        SettingsRow(
+          +                            icon = Icons.Rounded.Tune,
+          +                            title = automixGestureTitle,
+          +                            subtitle = stringResource(R.string.automix_gesture_subtitle),
+          +                            value = automixGesture.localizedLabel(),
+          +                            onClick = { pickingAutomixGesture = true },
+          +                        )
+          +                    }
+          +                    val loopReachTitle = stringResource(R.string.loop_reach)
+          +                    row(loopReachTitle, "loop", "instrumental", "vocal", "dj", "transition", "mix", "algorithm") {
+          +                        SettingsRow(
+          +                            icon = Icons.Rounded.Waves,
+          +                            title = loopReachTitle,
+          +                            subtitle = stringResource(R.string.loop_reach_subtitle),
+          +                            value = loopMixReach.localizedLabel(),
+          +                            onClick = { pickingLoopReach = true },
+          +                        )
+          +                    }
+          +                    val deepAnalysisTitle = stringResource(R.string.deep_analysis)
+          +                    row(deepAnalysisTitle, "analysis", "windows", "loop", "cpu", "battery", "mix", "algorithm") {
+          +                        SettingsRow(
+          +                            icon = Icons.Rounded.Tune,
+          +                            title = deepAnalysisTitle,
+          +                            subtitle = stringResource(R.string.deep_analysis_subtitle),
+          +                            trailing = {
+          +                                IosSwitch(
+          +                                    checked = deepAnalysis,
+          +                                    onCheckedChange = AppSettings::setDeepAnalysis,
+          +                                )
+          +                            },
+          +                            onClick = { AppSettings.setDeepAnalysis(!deepAnalysis) },
+          +                        )
+          +                    }
+          +                    val mixIntensityTitle = stringResource(R.string.mix_intensity)
+          +                    row(mixIntensityTitle, "punchy", "gentle", "intensity", "dj", "mix") {
+          +                        SliderRow(
+          +                            icon = Icons.Rounded.Waves,
+          +                            title = mixIntensityTitle,
+          +                            subtitle = stringResource(R.string.mix_intensity_subtitle),
+          +                            value = stringResource(
+          +                                when {
+          +                                    mixIntensity < 35 -> R.string.mix_intensity_gentle
+          +                                    mixIntensity > 65 -> R.string.mix_intensity_punchy
+          +                                    else -> R.string.mix_intensity_normal
+          +                                },
+          +                            ),
+          +                            sliderValue = mixIntensity.toFloat(),
+          +                            onSliderValue = { AppSettings.setMixIntensity(it.roundToInt()) },
+          +                            valueRange = 0f..100f,
+          +                            steps = 9,
+          +                        )
+          +                    }
+          +                }
+                       }
+                       val skipSilenceTitle = stringResource(R.string.skip_silence)
+                       row(skipSilenceTitle, "silence") {
+          diff --git a/app/src/main/res/values-vi/strings.xml b/app/src/main/res/values-vi/strings.xml
+          index 7b58c18..4c1492a 100644
+          --- a/app/src/main/res/values-vi/strings.xml
+          +++ b/app/src/main/res/values-vi/strings.xml
+          @@ -1442,6 +1442,10 @@
+               <string name="mix_intensity_gentle">Nhẹ</string>
+               <string name="mix_intensity_normal">Vừa</string>
+               <string name="mix_intensity_punchy">Mạnh</string>
+          +    <string name="automix_advanced">Nâng cao</string>
+          +    <string name="automix_advanced_subtitle">Thời điểm mix, kiểu nối khi lệch nhịp, độ rộng loop, phân tích sâu và độ mạnh tay. Mặc định đã ổn với hầu hết mọi người.</string>
+          +    <string name="automix_advanced_show">Mở</string>
+          +    <string name="automix_advanced_hide">Ẩn</string>
+           
+               <!-- Player visual effect -->
+               <string name="visual_effect">Hiệu ứng thanh tua và âm lượng</string>
+          diff --git a/app/src/main/res/values/strings.xml b/app/src/main/res/values/strings.xml
+          index a6f1270..9cc096e 100644
+          --- a/app/src/main/res/values/strings.xml
+          +++ b/app/src/main/res/values/strings.xml
+          @@ -1389,6 +1389,10 @@
+               <string name="mix_intensity_gentle">Gentle</string>
+               <string name="mix_intensity_normal">Normal</string>
+               <string name="mix_intensity_punchy">Punchy</string>
+          +    <string name="automix_advanced">Advanced</string>
+          +    <string name="automix_advanced_subtitle">Mix timing, tempo-mismatch handoff, loop reach, deep analysis and intensity. The defaults are fine for most people.</string>
+          +    <string name="automix_advanced_show">Show</string>
+          +    <string name="automix_advanced_hide">Hide</string>
+           
+               <!-- Player visual effect -->
+               <string name="visual_effect">Seek and volume bar effect</string>
+          PATCH_EOF
+
+      - name: Apply the patches
+        shell: bash
+        run: |
+          set -euo pipefail
+          APPLIED=already
+          for P in "$RUNNER_TEMP/1-verdict-line.patch" "$RUNNER_TEMP/2-settings-advanced.patch"; do
+            if git apply --reverse --check "$P" 2>/dev/null; then
+              echo "Đã có sẵn trong repo, bỏ qua: $P"
+              continue
+            fi
+            if ! git apply --check "$P"; then
+              echo "::error::Patch $(basename "$P") không áp được lên bản này (một trong các file đã bị sửa so với bản đã dùng để viết patch). Gửi lại các file bị nêu ở trên để mình làm lại patch."
+              exit 1
+            fi
+            git apply "$P"
+            APPLIED=yes
+            echo "Đã áp: $(basename "$P")"
+          done
+          echo "APPLIED=$APPLIED" >> "$GITHUB_ENV"
+          {
+            echo "## Automix: dòng trạng thái loop mix + gom cài đặt"
+            echo
+            echo "Kết quả áp patch: $APPLIED"
+            echo
+            git status --short | sed 's/^/    /'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit the patch locally
+        if: ${{ env.APPLIED == 'yes' }}
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A -- app shared sharedUi native
+          git commit -m "Automix: show why a pair gets no loop mix on the player; fold advanced Automix settings"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Write local.properties
+        run: |
+          echo "LASTFM_API_KEY=" > local.properties
+          echo "LASTFM_SECRET=" >> local.properties
+          echo "LISTEN_TOGETHER_SERVER=" >> local.properties
+
+      - run: chmod +x gradlew
+
+      - name: Shared tests
+        if: ${{ inputs.run_tests }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew :shared:jvmTest 2>&1 | tee build.log
+
+      - name: Build the release-like dev APK
+        if: ${{ inputs.build_apk }}
+        shell: bash
+        run: |
+          set -o pipefail
+          ./gradlew assembleDevBenchmark 2>&1 | tee -a build.log
+
+      - name: Upload the arm64 APK
+        if: ${{ inputs.build_apk }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: bitchord-automix-verdict-line-arm64
+          path: app/build/outputs/apk/dev/benchmark/*arm64-v8a*.apk
+          if-no-files-found: error
+
+      - name: Upload the test reports
+        if: ${{ always() && inputs.run_tests }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-test-reports
+          path: shared/build/reports/tests/
+          if-no-files-found: ignore
+
+      - name: Upload the build log
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Push the patched code to a branch
+        if: ${{ inputs.push_branch && env.APPLIED == 'yes' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git push --force-with-lease origin "HEAD:refs/heads/${FIX_BRANCH}"
+          echo "Đã đẩy sang nhánh \`${FIX_BRANCH}\`. Mở PR từ nhánh đó vào ${GITHUB_REF_NAME}." >> "$GITHUB_STEP_SUMMARY"
